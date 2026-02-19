@@ -1,0 +1,260 @@
+rules_version='2'
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      // This rule allows anyone with your database reference to view, edit,
+      // and delete all data in your database. It is useful for getting
+      // started, but it is configured to expire after 30 days because it
+      // leaves your app open to attackers. At that time, all client
+      // requests to your database will be denied.
+      //
+      // Make sure to write security rules for your app before that time, or
+      // else all client requests to your database will be denied until you
+      // update your rules.
+      allow read, write: if false;
+    }
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isKawerifyTechAdminEmail() {
+      return signedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email.matches('.*@kawerifytech\\.com$');
+    }
+
+    function hasAdminDoc(uid) {
+      return exists(/databases/$(database)/documents/admins/$(uid));
+    }
+
+    function isAdmin() {
+      // Admin can be:
+      // 1) Any authenticated user with an @kawerifytech.com email (automatic)
+      // 2) Any authenticated user added to /admins/{uid} in Firestore
+      return signedIn() && (isKawerifyTechAdminEmail() || hasAdminDoc(request.auth.uid));
+    }
+
+    function hasStudentDoc(uid) {
+      return exists(/databases/$(database)/documents/students/$(uid));
+    }
+
+    function hasInstructorDoc(uid) {
+      return exists(/databases/$(database)/documents/instructors/$(uid));
+    }
+
+    function isInstructor() {
+      return signedIn() && (
+        hasInstructorDoc(request.auth.uid) ||
+        (
+          request.auth.token.email != null &&
+          request.auth.token.email.matches('.*@uncommon\\.org$')
+        )
+      );
+    }
+
+    function isInstructorOrAdmin() {
+      return isInstructor() || isAdmin();
+    }
+
+    function getHubFromCanonicalProfile(uid) {
+      return hasStudentDoc(uid)
+        ? get(/databases/$(database)/documents/students/$(uid)).data.hub
+        : (hasInstructorDoc(uid)
+          ? get(/databases/$(database)/documents/instructors/$(uid)).data.hub
+          : null);
+    }
+
+    function requesterHub() {
+      return getHubFromCanonicalProfile(request.auth.uid) != null
+        ? getHubFromCanonicalProfile(request.auth.uid)
+        : get(/databases/$(database)/documents/users/$(request.auth.uid)).data.hub;
+    }
+
+    function targetHub(uid) {
+      return getHubFromCanonicalProfile(uid) != null
+        ? getHubFromCanonicalProfile(uid)
+        : get(/databases/$(database)/documents/users/$(uid)).data.hub;
+    }
+
+    function sameHub(uid) {
+      return requesterHub() != null && requesterHub() == targetHub(uid);
+    }
+
+    match /admins/{uid} {
+      // Admin records are used for Firestore-managed admin access.
+      // - Any @kawerifytech.com account can create its own admin doc automatically.
+      // - Existing admins can read/manage admin docs.
+      allow read: if isAdmin();
+      allow create: if signedIn() && request.auth.uid == uid && isKawerifyTechAdminEmail();
+      allow update, delete: if isAdmin();
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isInstructorOrAdmin());
+      allow create: if signedIn() && request.auth.uid == uid;
+      allow update: if signedIn() && (
+        request.auth.uid == uid ||
+        isAdmin() ||
+        (isInstructor() && sameHub(uid))
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /students/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isInstructorOrAdmin());
+      allow create: if signedIn() && request.auth.uid == uid;
+      allow update: if signedIn() && (
+        request.auth.uid == uid ||
+        isAdmin() ||
+        (isInstructor() && sameHub(uid))
+      );
+      allow delete: if isAdmin();
+
+      match /courseProgress/{courseId} {
+        allow read: if signedIn() && (
+          request.auth.uid == uid ||
+          isAdmin() ||
+          (isInstructor() && sameHub(uid))
+        );
+        allow create, update: if signedIn() && (
+          request.auth.uid == uid ||
+          isAdmin() ||
+          (isInstructor() && sameHub(uid))
+        );
+        allow delete: if false;
+      }
+
+      match /workspace/{docId} {
+        allow read: if signedIn() && (
+          request.auth.uid == uid ||
+          isAdmin() ||
+          (isInstructor() && sameHub(uid))
+        );
+        allow create, update: if signedIn() && (
+          request.auth.uid == uid ||
+          isAdmin() ||
+          (isInstructor() && sameHub(uid))
+        );
+        allow delete: if false;
+      }
+
+      match /events/{eventId} {
+        allow read: if signedIn() && (request.auth.uid == uid || isInstructorOrAdmin());
+        allow create: if signedIn() && (
+          request.auth.uid == uid ||
+          (isInstructor() && sameHub(uid))
+        );
+        allow update, delete: if false;
+      }
+
+      match /aeoDrafts/{draftId} {
+        allow read: if signedIn() && (request.auth.uid == uid || isAdmin() || (isInstructor() && sameHub(uid)));
+        allow create, update: if signedIn() && (request.auth.uid == uid || isAdmin() || (isInstructor() && sameHub(uid)));
+        allow delete: if signedIn() && (request.auth.uid == uid || isAdmin() || (isInstructor() && sameHub(uid)));
+      }
+    }
+
+    match /instructors/{uid} {
+      allow read: if signedIn() && (
+        request.auth.uid == uid ||
+        isInstructorOrAdmin() ||
+        (hasStudentDoc(request.auth.uid) && sameHub(uid))
+      );
+      allow create: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow update: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow delete: if isAdmin();
+
+      match /events/{eventId} {
+        allow read: if signedIn() && (request.auth.uid == uid || isInstructorOrAdmin());
+        allow create: if signedIn() && (request.auth.uid == uid || isAdmin());
+        allow update, delete: if false;
+      }
+    }
+
+    match /simulationStates/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isInstructorOrAdmin());
+      allow create, update: if signedIn() && (
+        request.auth.uid == uid ||
+        isAdmin() ||
+        (isInstructor() && sameHub(uid))
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /assessments/{assessmentId} {
+      allow read: if signedIn() && (
+        isAdmin() ||
+        (
+          resource.data.studentUid != null &&
+          request.auth.uid == resource.data.studentUid
+        ) ||
+        (
+          resource.data.studentUid != null &&
+          isInstructor() && sameHub(resource.data.studentUid)
+        )
+      );
+
+      allow create, update, delete: if signedIn() && (
+        isAdmin() ||
+        (
+          isInstructor() &&
+          request.resource.data.studentUid != null &&
+          sameHub(request.resource.data.studentUid)
+        )
+      );
+    }
+
+    match /resources/{docId} {
+      allow read: if true;
+      allow write: if isInstructorOrAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isInstructorOrAdmin();
+      allow write: if false;
+    }
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isInstructorOrAdmin();
+
+      match /modules/{moduleId} {
+        allow read: if true;
+        allow write: if isInstructorOrAdmin();
+
+        match /lessons/{lessonId} {
+          allow read: if true;
+          allow write: if isInstructorOrAdmin();
+        }
+
+        match /questions/{questionId} {
+          allow read: if true;
+          allow write: if isInstructorOrAdmin();
+        }
+      }
+
+      match /resources/{resourceId} {
+        allow read: if true;
+        allow write: if isInstructorOrAdmin();
+      }
+
+      match /final/{docId} {
+        allow read: if true;
+        allow write: if isInstructorOrAdmin();
+
+        match /questions/{questionId} {
+          allow read: if true;
+          allow write: if isInstructorOrAdmin();
+        }
+      }
+
+      match /enrollments/{uid} {
+        allow read: if true;
+        allow create: if signedIn() && request.auth.uid == uid;
+        allow update, delete: if false;
+      }
+    }
+  }
+}

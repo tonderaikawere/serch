@@ -1,0 +1,20 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "chats": {
+      "$instructorUid": {
+        "$studentUid": {
+          ".read": "auth != null && (auth.uid == $instructorUid || auth.uid == $studentUid)",
+          ".write": "auth != null && (auth.uid == $instructorUid || auth.uid == $studentUid)"
+        }
+      }
+    },
+    "simulationStates": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || (auth.token.email != null && auth.token.email.matches(/.*@uncommon\\.org$/)))",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    }
+  }
+}
