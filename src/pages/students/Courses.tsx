@@ -5,6 +5,8 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import { firestore } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -21,6 +23,7 @@ type CourseRow = {
 
 type CourseProgressDoc = {
   courseCompleted?: boolean;
+  completedLessonIds?: string[];
 };
 
 export default function StudentCourses() {
@@ -30,6 +33,7 @@ export default function StudentCourses() {
   const [courses, setCourses] = useState<CourseRow[]>([]);
   const [search, setSearch] = useState("");
   const [completedCourseIds, setCompletedCourseIds] = useState<Set<string>>(new Set());
+  const [completedLessonsByCourse, setCompletedLessonsByCourse] = useState<Record<string, number>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -87,15 +91,23 @@ export default function StudentCourses() {
           published.map(async (c) => {
             const snap = await getDoc(doc(firestore, "students", uid, "courseProgress", c.id));
             const data = (snap.exists() ? (snap.data() as CourseProgressDoc) : null) ?? null;
-            return { courseId: c.id, completed: data?.courseCompleted === true };
+            return {
+              courseId: c.id,
+              completed: data?.courseCompleted === true,
+              completedLessonsCount: Array.isArray(data?.completedLessonIds) ? data!.completedLessonIds!.length : 0,
+            };
           }),
         );
 
         if (cancelled) return;
         setCompletedCourseIds(new Set(reads.filter((r) => r.completed).map((r) => r.courseId)));
+        setCompletedLessonsByCourse(
+          Object.fromEntries(reads.map((r) => [r.courseId, r.completedLessonsCount])),
+        );
       } catch {
         if (cancelled) return;
         setCompletedCourseIds(new Set());
+        setCompletedLessonsByCourse({});
       }
     })();
 
@@ -132,14 +144,14 @@ export default function StudentCourses() {
     <DashboardLayout>
       <div className="p-6 space-y-6">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Courses</h1>
-          <p className="text-muted-foreground mt-1">Browse published courses and open modules.</p>
+          <h1 className="text-3xl font-bold text-foreground">Your Curriculum</h1>
+          <p className="text-muted-foreground mt-1">Complete each course in order. Modules, lessons, exercises, and tests live inside the course.</p>
         </div>
 
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between gap-4 flex-wrap">
-              <CardTitle>Published courses</CardTitle>
+              <CardTitle>Courses</CardTitle>
               <div className="w-full sm:w-[320px]">
                 <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search courses" />
               </div>
@@ -156,31 +168,54 @@ export default function StudentCourses() {
             {!loading && !error && filtered.length > 0 && (
               <div className="space-y-3">
                 {filtered.map((c) => (
-                  <div
+                  <Card
                     key={c.id}
                     className={
-                      "block rounded-lg border border-border p-4 transition-colors " +
+                      "transition-colors " +
                       (isCourseUnlocked(c.id) ? "hover:bg-muted/30" : "opacity-60")
                     }
                   >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <div className="font-medium text-foreground truncate">{c.title ?? "Untitled course"}</div>
-                        {c.description && <div className="text-sm text-muted-foreground mt-1">{c.description}</div>}
-                        <div className="text-xs text-muted-foreground mt-2">
-                          Modules: {typeof c.modulesCount === "number" ? c.modulesCount : "—"} · Resources:{" "}
-                          {typeof c.resourcesCount === "number" ? c.resourcesCount : "—"}
+                    <CardContent className="p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0 space-y-1">
+                          <div className="text-lg font-semibold text-foreground truncate">{c.title ?? "Untitled course"}</div>
+                          {c.description && <div className="text-sm text-muted-foreground">{c.description}</div>}
+                        </div>
+                        <Badge variant={isCourseUnlocked(c.id) ? "secondary" : "outline"}>
+                          {isCourseUnlocked(c.id) ? "Unlocked" : "Locked"}
+                        </Badge>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Progress
+                          value={
+                            completedCourseIds.has(c.id)
+                              ? 100
+                              : Math.min(
+                                  100,
+                                  ((completedLessonsByCourse[c.id] ?? 0) /
+                                    Math.max(1, (c.modulesCount ?? 20) * 11)) *
+                                    100,
+                                )
+                          }
+                        />
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div className="text-xs text-muted-foreground">
+                            {completedCourseIds.has(c.id)
+                              ? "Completed"
+                              : `${completedLessonsByCourse[c.id] ?? 0} lessons completed`}
+                          </div>
+                          {isCourseUnlocked(c.id) ? (
+                            <Button asChild size="sm">
+                              <Link to={`/students/courses/${c.id}`}>Continue</Link>
+                            </Button>
+                          ) : (
+                            <div className="text-xs text-muted-foreground">Finish previous course</div>
+                          )}
                         </div>
                       </div>
-                      {isCourseUnlocked(c.id) ? (
-                        <Badge variant="secondary">
-                          <Link to={`/students/courses/${c.id}`}>Open</Link>
-                        </Badge>
-                      ) : (
-                        <Badge variant="outline">Locked</Badge>
-                      )}
-                    </div>
-                  </div>
+                    </CardContent>
+                  </Card>
                 ))}
               </div>
             )}

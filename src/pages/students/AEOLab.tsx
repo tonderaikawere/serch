@@ -7,7 +7,7 @@ import { Progress } from "@/components/ui/progress";
 import { ScoreRing } from "@/components/ui/score-ring";
 import { useAuth } from "@/contexts/AuthContext";
 import { firestore } from "@/lib/firebase";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import { 
   MessageSquare, 
   Sparkles, 
@@ -19,7 +19,7 @@ import {
   Bot,
   FileText
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const targetQuestions = [
   { id: 1, question: "What is SEO?", intent: "Informational", difficulty: "Easy", selected: false },
@@ -29,27 +29,110 @@ const targetQuestions = [
   { id: 5, question: "What is AEO and how is it different from SEO?", intent: "Informational", difficulty: "Easy", selected: false },
 ];
 
-const clarityChecks = [
-  { label: "Direct answer in first sentence", passed: true },
-  { label: "Answer length optimal (40-60 words)", passed: true },
-  { label: "No jargon or complex terms", passed: false },
-  { label: "Factual and verifiable", passed: true },
-  { label: "Structured with clear formatting", passed: false },
-];
+type ClarityCheck = { label: string; passed: boolean };
 
 export default function AEOLab() {
   const { profile } = useAuth();
   const [questions, setQuestions] = useState(targetQuestions);
   const [selectedQuestion, setSelectedQuestion] = useState<number | null>(null);
   const [answer, setAnswer] = useState("");
-  const [aeoScore, setAeoScore] = useState(72);
+  const [aeoScore, setAeoScore] = useState(0);
+  const [checks, setChecks] = useState<ClarityCheck[]>([]);
+  const [analyzedAt, setAnalyzedAt] = useState<number | null>(null);
+
+  const uid = profile?.uid ?? null;
 
   const selectedQuestionText = selectedQuestion
     ? questions.find((q) => q.id === selectedQuestion)?.question ?? null
     : null;
 
+  async function persistWorkspace(next: {
+    selectedQuestionId: number | null;
+    answer: string;
+    score: number;
+    checks: ClarityCheck[];
+    analyzedAt: number | null;
+  }) {
+    if (!uid) return;
+    await setDoc(
+      doc(firestore, "students", uid, "workspace", "aeo"),
+      {
+        ...next,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    ).catch(() => {});
+  }
+
+  async function logEvent(type: string, label: string, meta?: Record<string, unknown>) {
+    if (!uid) return;
+    await addDoc(collection(firestore, "students", uid, "events"), {
+      type,
+      label,
+      meta: meta ?? {},
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!uid) return;
+    let cancelled = false;
+    void (async () => {
+      const ref = doc(firestore, "students", uid, "workspace", "aeo");
+      const snap = await getDoc(ref).catch(() => null);
+      if (cancelled || !snap || !snap.exists()) return;
+      const data = snap.data() as {
+        selectedQuestionId?: number | null;
+        answer?: string;
+        score?: number;
+        checks?: ClarityCheck[];
+        analyzedAt?: number | null;
+      };
+      if (typeof data.selectedQuestionId === "number") setSelectedQuestion(data.selectedQuestionId);
+      if (typeof data.answer === "string") setAnswer(data.answer);
+      if (typeof data.score === "number") setAeoScore(data.score);
+      if (Array.isArray(data.checks)) setChecks(data.checks);
+      if (typeof data.analyzedAt === "number") setAnalyzedAt(data.analyzedAt);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uid]);
+
+  const selectedCount = useMemo(() => questions.filter((q) => q.selected).length, [questions]);
+
+  function computeChecks(text: string): ClarityCheck[] {
+    const t = text.trim();
+    const words = t.length ? t.split(/\s+/).filter(Boolean) : [];
+    const sentences = t.split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 0);
+    const firstSentence = (sentences[0] ?? "").trim();
+
+    const hasDirectAnswerFirstSentence = firstSentence.length > 0 && firstSentence.split(/\s+/).filter(Boolean).length >= 6;
+    const wordCountOptimal = words.length >= 40 && words.length <= 60;
+    const hasBullets = /\n\s*[-*]\s+/.test(t);
+    const hasSteps = /\n\s*\d+[).]\s+/.test(t);
+    const hasStructure = hasBullets || hasSteps;
+    const hasSpecifics = /\b\d+\b/.test(t) || t.includes(":");
+
+    const jargon = ["synergy", "leverage", "paradigm", "revolutionize", "cutting-edge", "innovative", "disrupt", "holistic"];
+    const containsJargon = jargon.some((w) => t.toLowerCase().includes(w));
+
+    return [
+      { label: "Direct answer in the first sentence", passed: hasDirectAnswerFirstSentence },
+      { label: "Answer length is 40–60 words", passed: wordCountOptimal },
+      { label: "Clear structure (bullets or steps)", passed: hasStructure },
+      { label: "Uses specifics (numbers/examples)", passed: hasSpecifics },
+      { label: "Avoids vague jargon", passed: !containsJargon },
+    ];
+  }
+
+  function computeScore(nextChecks: ClarityCheck[]) {
+    if (nextChecks.length === 0) return 0;
+    const passed = nextChecks.filter((c) => c.passed).length;
+    return Math.round((passed / nextChecks.length) * 100);
+  }
+
   const saveDraft = async () => {
-    const uid = profile?.uid;
     if (!uid || !selectedQuestionText || !answer.trim()) return;
 
     await addDoc(collection(firestore, "students", uid, "aeoDrafts"), {
@@ -68,14 +151,19 @@ export default function AEOLab() {
   };
 
   const toggleQuestion = (id: number) => {
-    setQuestions(questions.map(q => 
-      q.id === id ? { ...q, selected: !q.selected } : q
-    ));
+    setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, selected: !q.selected } : q)));
     setSelectedQuestion(id);
+    void persistWorkspace({
+      selectedQuestionId: id,
+      answer,
+      score: aeoScore,
+      checks,
+      analyzedAt,
+    });
+    void logEvent("aeo_question_selected", "AEO question selected", { id });
   };
 
-  const selectedCount = questions.filter(q => q.selected).length;
-  const passedChecks = clarityChecks.filter(c => c.passed).length;
+  const passedChecks = checks.filter((c) => c.passed).length;
 
   return (
     <DashboardLayout>
@@ -178,7 +266,26 @@ export default function AEOLab() {
               </div>
 
               <div className="flex gap-3">
-                <Button className="flex-1">
+                <Button
+                  className="flex-1"
+                  disabled={!selectedQuestion || !answer.trim()}
+                  onClick={() => {
+                    const nextChecks = computeChecks(answer);
+                    const score = computeScore(nextChecks);
+                    const ts = Date.now();
+                    setChecks(nextChecks);
+                    setAeoScore(score);
+                    setAnalyzedAt(ts);
+                    void persistWorkspace({
+                      selectedQuestionId: selectedQuestion,
+                      answer,
+                      score,
+                      checks: nextChecks,
+                      analyzedAt: ts,
+                    });
+                    void logEvent("aeo_analyzed", "AEO answer analyzed", { score });
+                  }}
+                >
                   <Sparkles className="w-4 h-4 mr-2" />
                   Analyze Answer
                 </Button>
@@ -210,7 +317,8 @@ export default function AEOLab() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-3">
-                {clarityChecks.map((check, index) => (
+                {checks.length === 0 && <div className="text-sm text-muted-foreground">Click Analyze Answer to run automatic checks.</div>}
+                {checks.map((check, index) => (
                   <div key={index} className="flex items-center gap-3">
                     {check.passed ? (
                       <CheckCircle2 className="w-5 h-5 text-success" />
@@ -227,9 +335,9 @@ export default function AEOLab() {
               <div className="pt-4 border-t border-border">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium">Clarity Score</span>
-                  <span className="text-sm text-muted-foreground">{passedChecks}/{clarityChecks.length} passed</span>
+                  <span className="text-sm text-muted-foreground">{passedChecks}/{checks.length || 5} passed</span>
                 </div>
-                <Progress value={(passedChecks / clarityChecks.length) * 100} className="h-2" />
+                <Progress value={checks.length ? (passedChecks / checks.length) * 100 : 0} className="h-2" />
               </div>
             </CardContent>
           </Card>

@@ -47,6 +47,7 @@ type ResourceDoc = {
   title?: string;
   description?: string;
   url?: string;
+  content?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -85,6 +86,7 @@ export default function InstructorCourseEditor() {
   const [newResourceTitle, setNewResourceTitle] = useState("");
   const [newResourceDescription, setNewResourceDescription] = useState("");
   const [newResourceUrl, setNewResourceUrl] = useState("");
+  const [newResourceContent, setNewResourceContent] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -204,6 +206,7 @@ export default function InstructorCourseEditor() {
       title,
       description: newResourceDescription.trim(),
       url: newResourceUrl.trim(),
+      content: newResourceContent.trim(),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -215,6 +218,7 @@ export default function InstructorCourseEditor() {
           title,
           description: newResourceDescription.trim(),
           url: newResourceUrl.trim(),
+          content: newResourceContent.trim(),
         },
       },
       ...prev,
@@ -223,6 +227,7 @@ export default function InstructorCourseEditor() {
     setNewResourceTitle("");
     setNewResourceDescription("");
     setNewResourceUrl("");
+    setNewResourceContent("");
   }
 
   async function deleteResource(resourceId: string) {
@@ -522,6 +527,15 @@ export default function InstructorCourseEditor() {
                           <div className="text-sm text-muted-foreground">URL</div>
                           <Input value={newResourceUrl} onChange={(e) => setNewResourceUrl(e.target.value)} placeholder="https://" />
                         </div>
+                        <div className="space-y-2">
+                          <div className="text-sm text-muted-foreground">Content</div>
+                          <Textarea
+                            value={newResourceContent}
+                            onChange={(e) => setNewResourceContent(e.target.value)}
+                            placeholder="Write the resource content students will read inside the course"
+                            className="min-h-[180px]"
+                          />
+                        </div>
                       </div>
 
                       <DialogFooter>
@@ -551,6 +565,12 @@ export default function InstructorCourseEditor() {
                                   {r.data.url}
                                 </a>
                               </div>
+                            )}
+                            {r.data.content && (
+                              <>
+                                <Separator className="my-4" />
+                                <div className="text-sm text-muted-foreground whitespace-pre-wrap">{r.data.content}</div>
+                              </>
                             )}
                           </div>
                           <Button

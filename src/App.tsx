@@ -24,10 +24,8 @@ import SchemaBuilder from "./pages/students/SchemaBuilder";
 import TechnicalSEO from "./pages/students/TechnicalSEO";
 import MetadataEditor from "./pages/students/MetadataEditor";
 import Performance from "./pages/students/Performance";
-import LearningModules from "./pages/students/LearningModules";
 import StudentCourses from "./pages/students/Courses";
 import StudentCourseDetails from "./pages/students/CourseDetails";
-import StudentModuleTest from "./pages/students/ModuleTest";
 import StudentFinalExam from "./pages/students/FinalExam";
 import Settings from "./pages/admin/Settings";
 import Certification from "./pages/admin/Certification";
@@ -128,16 +126,6 @@ const App = () => (
                 }
               />
               <Route
-                path="/students/courses/:courseId/modules/:moduleId/test"
-                element={
-                  <RequireAuth>
-                    <RequireRole allow={["student", "admin"]}>
-                      <StudentModuleTest />
-                    </RequireRole>
-                  </RequireAuth>
-                }
-              />
-              <Route
                 path="/students/courses/:courseId/final"
                 element={
                   <RequireAuth>
@@ -223,16 +211,6 @@ const App = () => (
                   <RequireAuth>
                     <RequireRole allow={["student", "admin"]}>
                       <Performance />
-                    </RequireRole>
-                  </RequireAuth>
-                }
-              />
-              <Route
-                path="/students/learning"
-                element={
-                  <RequireAuth>
-                    <RequireRole allow={["student", "admin"]}>
-                      <LearningModules />
                     </RequireRole>
                   </RequireAuth>
                 }
@@ -494,7 +472,7 @@ const App = () => (
               <Route path="/technical" element={<Navigate to="/students/technical" replace />} />
               <Route path="/metadata" element={<Navigate to="/students/metadata" replace />} />
               <Route path="/performance" element={<Navigate to="/students/performance" replace />} />
-              <Route path="/learning" element={<Navigate to="/students/learning" replace />} />
+              <Route path="/learning" element={<Navigate to="/students/courses" replace />} />
               <Route path="/instructor" element={<Navigate to="/instructors" replace />} />
               <Route path="/settings" element={<Navigate to="/admin/settings" replace />} />
               <Route path="/certification" element={<Navigate to="/admin/certification" replace />} />

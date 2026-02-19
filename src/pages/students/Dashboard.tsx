@@ -101,7 +101,7 @@ export default function Dashboard() {
                 <p className="text-sm text-muted-foreground">Start learning modules to track completion</p>
               </div>
             </div>
-            <Link to="/students/learning">
+            <Link to="/students/courses">
               <Button variant="outline" size="sm">
                 Continue Learning
                 <ArrowRight className="w-4 h-4 ml-2" />

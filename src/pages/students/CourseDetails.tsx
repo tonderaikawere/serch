@@ -5,6 +5,10 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { firestore } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -40,6 +44,7 @@ type ResourceDoc = {
   title?: string;
   description?: string;
   url?: string;
+  content?: string;
   updatedAt?: unknown;
 };
 
@@ -144,12 +149,25 @@ export default function StudentCourseDetails() {
 
   const completedLessonIds = useMemo(() => new Set(progress?.completedLessonIds ?? []), [progress?.completedLessonIds]);
 
+  const totalLessons = useMemo(() => {
+    const total = Object.values(lessonsByModule).reduce((sum, x) => sum + x.length, 0);
+    return total;
+  }, [lessonsByModule]);
+
+  const completedLessonsCount = progress?.completedLessonIds?.length ?? 0;
+  const courseProgressPct = totalLessons > 0 ? Math.min(100, (completedLessonsCount / totalLessons) * 100) : 0;
+
   const activeModule = openModuleId ? modules.find((m) => m.id === openModuleId) ?? null : null;
   const activeLessons = useMemo(() => (openModuleId ? lessonsByModule[openModuleId] ?? [] : []), [lessonsByModule, openModuleId]);
   const activeLesson = useMemo(
     () => (openLessonId ? activeLessons.find((l) => l.id === openLessonId) ?? null : null),
     [activeLessons, openLessonId],
   );
+
+  const activeLessonIndex = useMemo(() => {
+    if (!openLessonId) return -1;
+    return activeLessons.findIndex((l) => l.id === openLessonId);
+  }, [activeLessons, openLessonId]);
 
   const activeModuleIndex = useMemo(() => {
     if (!openModuleId) return -1;
@@ -193,6 +211,50 @@ export default function StudentCourseDetails() {
     const courseCompleted = allLessonIds.length > 0 && allLessonIds.every((id) => completedSet.has(id));
 
     await persistProgress({ completedLessonIds: next, courseCompleted });
+
+    // Auto-advance when completing the currently open lesson.
+    if (openLessonId === lessonId && activeModule) {
+      const lessons = lessonsByModule[activeModule.id] ?? [];
+      const unlockedIdx = (() => {
+        for (let i = 0; i < lessons.length; i += 1) {
+          if (!completedSet.has(lessons[i].id)) return i;
+        }
+        return lessons.length;
+      })();
+
+      const currentIdx = lessons.findIndex((l) => l.id === lessonId);
+      for (let i = currentIdx + 1; i < lessons.length; i += 1) {
+        if (i <= unlockedIdx) {
+          const nextLessonId = lessons[i].id;
+          setOpenLessonId(nextLessonId);
+          await setCurrentLesson(activeModule.id, nextLessonId);
+          return;
+        }
+      }
+
+      // If no next lesson in this module, jump to the next unlocked module.
+      const currentModuleIdx = moduleOrder.findIndex((m) => m.id === activeModule.id);
+      for (let mi = currentModuleIdx + 1; mi < moduleOrder.length; mi += 1) {
+        const m = moduleOrder[mi];
+        if (!isModuleUnlocked(m.id)) continue;
+        const nextLessons = lessonsByModule[m.id] ?? [];
+        const nextLessonIdx = (() => {
+          for (let i = 0; i < nextLessons.length; i += 1) {
+            if (!completedSet.has(nextLessons[i].id)) return i;
+          }
+          return nextLessons.length;
+        })();
+
+        const candidate = nextLessons[nextLessonIdx]?.id ?? nextLessons[0]?.id ?? null;
+        if (candidate) {
+          setOpenModuleId(m.id);
+          setOpenLessonId(candidate);
+          await setCurrentModule(m.id);
+          await setCurrentLesson(m.id, candidate);
+        }
+        break;
+      }
+    }
   }
 
   const moduleOrder = useMemo(() => {
@@ -224,17 +286,215 @@ export default function StudentCourseDetails() {
     return lessons.length;
   }
 
+  function isLessonUnlocked(lessons: Array<{ id: string; data: LessonDoc }>, lessonIndex: number) {
+    const unlockedLessonIdx = nextIncompleteLessonIndex(lessons);
+    return lessonIndex <= unlockedLessonIdx;
+  }
+
+  function cleanLessonTitle(moduleTitle: string, rawTitle: string | null | undefined) {
+    const t = (rawTitle ?? "").trim();
+    if (!t) return null;
+    const prefix = `${moduleTitle} - `;
+    if (t.startsWith(prefix)) return t.slice(prefix.length);
+
+    const lastDash = t.lastIndexOf(" - ");
+    if (lastDash > 0) {
+      const tail = t.slice(lastDash + 3).trim();
+      if (tail) return tail;
+    }
+
+    return t;
+  }
+
+  function renderLessonContent(raw: string) {
+    const text = raw.trim();
+    if (!text) return <div className="text-sm text-muted-foreground">No content yet.</div>;
+
+    const parts = text.split(/\n\n+/g).map((p) => p.trim()).filter(Boolean);
+    return (
+      <div className="space-y-4">
+        {parts.map((p, idx) => {
+          const heading = p.toLowerCase();
+          if (heading === "learning outcomes" || heading === "lesson" || heading === "checklist" || heading === "quick exercise") {
+            const title = p;
+            const isPrimary = heading === "learning outcomes";
+            return (
+              <div
+                key={`${idx}-${title}`}
+                className={
+                  (isPrimary ? "bg-primary/10 border-primary/30 " : "bg-muted/30 border-border ") +
+                  "rounded-lg border px-4 py-3"
+                }
+              >
+                <div className={(isPrimary ? "text-primary" : "text-foreground") + " font-bold"}>{title}</div>
+              </div>
+            );
+          }
+
+          if (p.startsWith("- ")) {
+            const lines = p.split("\n").map((l) => l.trim()).filter(Boolean);
+            return (
+              <ul key={idx} className="list-disc pl-6 text-sm text-foreground space-y-1">
+                {lines.map((l) => (
+                  <li key={l}>{l.replace(/^-\s+/, "")}</li>
+                ))}
+              </ul>
+            );
+          }
+
+          if (/^\d+[).]\s+/.test(p) || /^\d+[).]\s+/.test(p.split("\n")[0] ?? "")) {
+            const lines = p.split("\n").map((l) => l.trim()).filter(Boolean);
+            return (
+              <ol key={idx} className="list-decimal pl-6 text-sm text-foreground space-y-1">
+                {lines.map((l) => (
+                  <li key={l}>{l.replace(/^\d+[).]\s+/, "")}</li>
+                ))}
+              </ol>
+            );
+          }
+
+          if (p.length <= 40 && !p.includes(" ")) {
+            return (
+              <div key={idx} className="text-sm font-bold text-foreground">
+                {p}
+              </div>
+            );
+          }
+
+          return (
+            <p key={idx} className="text-sm text-foreground whitespace-pre-wrap leading-relaxed">
+              {p}
+            </p>
+          );
+        })}
+      </div>
+    );
+  }
+
+  const prevNext = useMemo(() => {
+    if (!activeModule) return { prevId: null as string | null, nextId: null as string | null };
+    if (activeLessons.length === 0) return { prevId: null, nextId: null };
+    if (activeLessonIndex < 0) return { prevId: null, nextId: null };
+
+    let prevId: string | null = null;
+    for (let i = activeLessonIndex - 1; i >= 0; i -= 1) {
+      if (isLessonUnlocked(activeLessons, i)) {
+        prevId = activeLessons[i].id;
+        break;
+      }
+    }
+
+    let nextId: string | null = null;
+    for (let i = activeLessonIndex + 1; i < activeLessons.length; i += 1) {
+      if (isLessonUnlocked(activeLessons, i)) {
+        nextId = activeLessons[i].id;
+        break;
+      }
+    }
+
+    return { prevId, nextId };
+  }, [activeLessonIndex, activeLessons, activeModule]);
+
+  const recommendedModuleId = useMemo(() => {
+    if (moduleOrder.length === 0) return null;
+    const idx = Math.min(unlockedModuleIndex, moduleOrder.length - 1);
+    return moduleOrder[idx]?.id ?? moduleOrder[0]?.id ?? null;
+  }, [moduleOrder, unlockedModuleIndex]);
+
+  const recommendedLessonId = useMemo(() => {
+    if (!recommendedModuleId) return null;
+    const lessons = lessonsByModule[recommendedModuleId] ?? [];
+    const nextIdx = nextIncompleteLessonIndex(lessons);
+    return lessons[nextIdx]?.id ?? lessons[0]?.id ?? null;
+  }, [lessonsByModule, recommendedModuleId]);
+
+  useEffect(() => {
+    if (loading) return;
+    if (!courseId) return;
+    if (!course || course.published !== true) return;
+    if (modules.length === 0) return;
+    if (Object.keys(lessonsByModule).length === 0) return;
+    if (openModuleId && openLessonId) return;
+
+    const trySelect = (moduleId: string | null | undefined, lessonId: string | null | undefined) => {
+      if (!moduleId || !lessonId) return false;
+      if (!isModuleUnlocked(moduleId)) return false;
+      const lessons = lessonsByModule[moduleId] ?? [];
+      const idx = lessons.findIndex((l) => l.id === lessonId);
+      if (idx < 0) return false;
+      if (!isLessonUnlocked(lessons, idx)) return false;
+
+      setOpenModuleId(moduleId);
+      setOpenLessonId(lessonId);
+      void setCurrentLesson(moduleId, lessonId);
+      return true;
+    };
+
+    // Prefer saved progress (if still valid/unlocked)
+    const fromProgress = trySelect(progress?.currentModuleId, progress?.currentLessonId);
+    if (fromProgress) return;
+
+    // Otherwise select the recommended (first unlocked + first incomplete)
+    if (recommendedModuleId) {
+      const lessons = lessonsByModule[recommendedModuleId] ?? [];
+      const nextIdx = nextIncompleteLessonIndex(lessons);
+      const candidate = lessons[nextIdx]?.id ?? lessons[0]?.id ?? null;
+      if (candidate && trySelect(recommendedModuleId, candidate)) return;
+    }
+
+    // Fallback: first unlocked module + its first unlocked lesson
+    for (let i = 0; i < moduleOrder.length; i += 1) {
+      const m = moduleOrder[i];
+      if (!isModuleUnlocked(m.id)) continue;
+      const lessons = lessonsByModule[m.id] ?? [];
+      const nextIdx = nextIncompleteLessonIndex(lessons);
+      const candidate = lessons[nextIdx]?.id ?? lessons[0]?.id ?? null;
+      if (candidate && trySelect(m.id, candidate)) return;
+    }
+  }, [
+    loading,
+    courseId,
+    course,
+    modules.length,
+    lessonsByModule,
+    openModuleId,
+    openLessonId,
+    progress?.currentModuleId,
+    progress?.currentLessonId,
+    recommendedModuleId,
+    moduleOrder,
+  ]);
+
   return (
     <DashboardLayout>
       <div className="p-6 space-y-6">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-3xl font-bold text-foreground">Course</h1>
-            <p className="text-muted-foreground mt-1">Read modules and content.</p>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-sm text-muted-foreground">Course</div>
+            <h1 className="text-3xl font-bold text-foreground truncate">{course?.title ?? "Untitled course"}</h1>
+            {course?.description && <p className="text-muted-foreground mt-1">{course.description}</p>}
           </div>
-          <Button asChild variant="outline">
-            <Link to="/students/courses">Back to courses</Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link to="/students/courses">Back</Link>
+            </Button>
+            {courseId && (
+              <Button
+                disabled={!recommendedModuleId || !recommendedLessonId}
+                onClick={() => {
+                  const mId = recommendedModuleId;
+                  const lId = recommendedLessonId;
+                  if (!mId || !lId) return;
+                  setOpenModuleId(mId);
+                  setOpenLessonId(lId);
+                  void setCurrentModule(mId);
+                  void setCurrentLesson(mId, lId);
+                }}
+              >
+                Continue learning
+              </Button>
+            )}
+          </div>
         </div>
 
         {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
@@ -252,163 +512,236 @@ export default function StudentCourseDetails() {
         )}
 
         {!loading && !error && course && course.published === true && (
-          <div className="grid lg:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>{course.title ?? "Untitled course"}</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {course.description && <div className="text-sm text-muted-foreground">{course.description}</div>}
+          <div className="space-y-6">
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" size="sm">Lessons</Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="p-0 flex flex-col h-full">
+                <SheetHeader className="p-6 pb-3">
+                  <SheetTitle>Learning Modules</SheetTitle>
+                </SheetHeader>
+                <div className="px-6 pb-6 space-y-4 overflow-y-auto flex-1 min-h-0">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs text-muted-foreground">
+                        {progress?.courseCompleted ? "Course completed" : `${completedLessonsCount}/${totalLessons || "—"} lessons completed`}
+                      </div>
+                      <Badge variant={progress?.courseCompleted ? "secondary" : "outline"}>
+                        {progress?.courseCompleted ? "Completed" : "In progress"}
+                      </Badge>
+                    </div>
+                    <Progress value={progress?.courseCompleted ? 100 : courseProgressPct} />
+                  </div>
 
-                <Separator />
+                  {modules.length === 0 && <div className="text-sm text-muted-foreground">No learning modules yet.</div>}
 
-                <div className="space-y-2">
-                  <div className="text-sm font-medium text-foreground">Modules</div>
-                  {modules.length === 0 && <div className="text-sm text-muted-foreground">No modules yet.</div>}
                   {modules.length > 0 && (
-                    <div className="space-y-2">
-                      {moduleOrder.map((m) => {
+                    <Accordion
+                      type="single"
+                      collapsible
+                      value={openModuleId ?? undefined}
+                      onValueChange={(v) => {
+                        if (!v) return;
+                        if (!isModuleUnlocked(v)) return;
+                        setOpenModuleId(v);
+                        void setCurrentModule(v);
+                        const lessons = lessonsByModule[v] ?? [];
+                        const nextIdx = nextIncompleteLessonIndex(lessons);
+                        const nextLesson = lessons[nextIdx]?.id ?? lessons[0]?.id ?? null;
+                        if (nextLesson) {
+                          setOpenLessonId(nextLesson);
+                          void setCurrentLesson(v, nextLesson);
+                        }
+                      }}
+                    >
+                      {moduleOrder.map((m, idx) => {
                         const unlocked = isModuleUnlocked(m.id);
                         const lessons = lessonsByModule[m.id] ?? [];
                         const nextIdx = nextIncompleteLessonIndex(lessons);
-                        const status = nextIdx >= lessons.length ? "Completed" : unlocked ? "Unlocked" : "Locked";
+                        const completed = nextIdx >= lessons.length && lessons.length > 0;
+                        const status = completed ? "Completed" : unlocked ? "Unlocked" : "Locked";
+
                         return (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => {
-                              if (!unlocked) return;
-                              setOpenModuleId(m.id);
-                              const nextLesson = lessons[nextIdx]?.id ?? lessons[0]?.id ?? null;
-                              setOpenLessonId(nextLesson);
-                              void setCurrentModule(m.id);
-                              if (nextLesson) void setCurrentLesson(m.id, nextLesson);
-                            }}
-                            className={
-                              "w-full text-left rounded-lg border border-border p-3 transition-colors " +
-                              (unlocked ? "hover:bg-muted/30" : "opacity-60 cursor-not-allowed")
-                            }
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="font-medium text-foreground">{m.data.title ?? "Module"}</div>
-                                {m.data.description && <div className="text-sm text-muted-foreground mt-1">{m.data.description}</div>}
+                          <AccordionItem key={m.id} value={m.id} className={unlocked ? "" : "opacity-60"}>
+                            <AccordionTrigger className={unlocked ? "" : "cursor-not-allowed"}>
+                              <div className="flex items-center justify-between w-full pr-3 gap-3">
+                                <div className="min-w-0 text-left">
+                                  <div className="text-sm font-medium text-foreground truncate">
+                                    {idx + 1}. {m.data.title ?? "Module"}
+                                  </div>
+                                  {m.data.description && (
+                                    <div className="text-xs text-muted-foreground mt-1 truncate">{m.data.description}</div>
+                                  )}
+                                </div>
+                                <div className="shrink-0">
+                                  <Badge variant={completed ? "secondary" : "outline"}>{status}</Badge>
+                                </div>
                               </div>
-                              <div className="text-xs text-muted-foreground shrink-0">{status}</div>
-                            </div>
-                          </button>
+                            </AccordionTrigger>
+                            <AccordionContent>
+                              {!unlocked && (
+                                <div className="text-sm text-muted-foreground">Locked. Complete the previous module exercise to unlock.</div>
+                              )}
+                              {unlocked && (
+                                <div className="space-y-2">
+                                  {lessons.map((l, lessonIdx) => {
+                                    const lessonUnlocked = isLessonUnlocked(lessons, lessonIdx);
+                                    const done = completedLessonIds.has(l.id);
+                                    const label = l.data.type === "exercise" ? "Exercise" : `Lesson ${lessonIdx + 1}`;
+                                    const clean = cleanLessonTitle(m.data.title ?? "Module", l.data.title) ?? label;
+                                    const active = l.id === openLessonId && m.id === openModuleId;
+                                    return (
+                                      <button
+                                        key={l.id}
+                                        type="button"
+                                        onClick={() => {
+                                          if (!lessonUnlocked) return;
+                                          setOpenModuleId(m.id);
+                                          setOpenLessonId(l.id);
+                                          void setCurrentModule(m.id);
+                                          void setCurrentLesson(m.id, l.id);
+                                        }}
+                                        className={
+                                          "w-full rounded-lg border px-3 py-2 text-left transition-colors " +
+                                          (active ? "border-primary bg-primary/5 " : "border-border ") +
+                                          (lessonUnlocked ? "hover:bg-muted/30" : "opacity-60 cursor-not-allowed")
+                                        }
+                                      >
+                                        <div className="flex items-center justify-between gap-3">
+                                          <div className="min-w-0">
+                                            <div className="text-xs text-muted-foreground">{label}</div>
+                                            <div className="text-sm font-medium text-foreground truncate">{clean}</div>
+                                          </div>
+                                          <Badge variant={done ? "secondary" : "outline"}>{done ? "Done" : lessonUnlocked ? "Open" : "Locked"}</Badge>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </AccordionContent>
+                          </AccordionItem>
                         );
                       })}
-                    </div>
+                    </Accordion>
                   )}
                 </div>
-
-                <Separator />
-
-                <div className="space-y-2">
-                  <div className="text-sm font-medium text-foreground">Resources</div>
-                  {resources.length === 0 && <div className="text-sm text-muted-foreground">No resources yet.</div>}
-                  {resources.length > 0 && (
-                    <div className="space-y-2">
-                      {resources.map((r) => (
-                        <div key={r.id} className="rounded-lg border border-border p-3">
-                          <div className="font-medium text-foreground">{r.data.title ?? "Resource"}</div>
-                          {r.data.description && <div className="text-sm text-muted-foreground mt-1">{r.data.description}</div>}
-                          {r.data.url && (
-                            <div className="text-sm mt-2">
-                              <a className="text-primary hover:underline break-all" href={r.data.url} target="_blank" rel="noreferrer">
-                                {r.data.url}
-                              </a>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+              </SheetContent>
+            </Sheet>
 
             <Card>
               <CardHeader>
-                <CardTitle>{activeLesson?.data.title ?? activeModule?.data.title ?? "Lesson"}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {!activeModule && <div className="text-sm text-muted-foreground">Select a module to start lessons.</div>}
-                {activeModule && (
-                  <div className="space-y-4">
-                    <div className="space-y-3">
-                      <div className="text-sm font-medium text-foreground">Lessons</div>
-                      {activeLessons.length === 0 && <div className="text-sm text-muted-foreground">No lessons yet.</div>}
-                      {activeLessons.length > 0 && (
-                        <div className="space-y-2">
-                          {activeLessons.map((l, idx) => {
-                            const unlockedLessonIdx = nextIncompleteLessonIndex(activeLessons);
-                            const unlocked = idx <= unlockedLessonIdx;
-                            const done = completedLessonIds.has(l.id);
-                            return (
-                              <button
-                                key={l.id}
-                                type="button"
-                                onClick={() => {
-                                  if (!unlocked) return;
-                                  setOpenLessonId(l.id);
-                                  void setCurrentLesson(activeModule.id, l.id);
-                                }}
-                                className={
-                                  "w-full text-left rounded-lg border border-border p-3 transition-colors " +
-                                  (unlocked ? "hover:bg-muted/30" : "opacity-60 cursor-not-allowed")
-                                }
-                              >
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="font-medium text-foreground truncate">{l.data.title ?? `Lesson ${idx + 1}`}</div>
-                                    <div className="text-xs text-muted-foreground mt-1">
-                                      {l.data.type === "exercise" ? "Exercise" : "Lesson"}
-                                    </div>
-                                  </div>
-                                  <div className="text-xs text-muted-foreground shrink-0">{done ? "Done" : unlocked ? "Open" : "Locked"}</div>
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    <Separator />
-
-                    {!activeLesson && <div className="text-sm text-muted-foreground">Select a lesson to read.</div>}
-                    {activeLesson && (
-                      <div className="space-y-3">
-                        <div className="text-sm text-muted-foreground whitespace-pre-wrap">{activeLesson.data.content ?? ""}</div>
-                        <div className="flex items-center justify-end">
-                          <Button onClick={() => void markLessonComplete(activeLesson.id)} disabled={completedLessonIds.has(activeLesson.id)}>
-                            {completedLessonIds.has(activeLesson.id) ? "Completed" : "Mark complete"}
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
-                      <div className="text-sm text-muted-foreground">
-                        Module {activeModuleIndex >= 0 ? activeModuleIndex + 1 : "—"} of {modules.length}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {courseId && openModuleId && (
-                          <Button asChild>
-                            <Link to={`/students/courses/${courseId}/modules/${openModuleId}/test`}>Take Test</Link>
-                          </Button>
-                        )}
-                        {courseId && (
-                          <Button asChild variant="outline">
-                            <Link to={`/students/courses/${courseId}/final`}>Final Exam</Link>
-                          </Button>
-                        )}
-                      </div>
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div className="space-y-1 min-w-0">
+                    <CardTitle className="truncate">
+                      {activeLesson
+                        ? cleanLessonTitle(activeModule?.data.title ?? "Module", activeLesson.data.title) ?? "Lesson"
+                        : "Choose a lesson"}
+                    </CardTitle>
+                    <div className="text-xs text-muted-foreground">
+                      {activeModule
+                        ? `Module ${activeModuleIndex >= 0 ? activeModuleIndex + 1 : "—"} of ${modules.length}`
+                        : "Open Lessons to begin"}
                     </div>
                   </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!activeModule || !prevNext.prevId}
+                      onClick={() => {
+                        if (!activeModule || !prevNext.prevId) return;
+                        setOpenLessonId(prevNext.prevId);
+                        void setCurrentLesson(activeModule.id, prevNext.prevId);
+                      }}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={!activeModule || !prevNext.nextId}
+                      onClick={() => {
+                        if (!activeModule || !prevNext.nextId) return;
+                        setOpenLessonId(prevNext.nextId);
+                        void setCurrentLesson(activeModule.id, prevNext.nextId);
+                      }}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {!activeModule && (
+                  <div className="text-sm text-muted-foreground">Open Lessons, then select a module and lesson.</div>
                 )}
+
+                {activeModule && !activeLesson && (
+                  <div className="text-sm text-muted-foreground">Select a lesson to start reading.</div>
+                )}
+
+                {activeLesson && (
+                  <>
+                    {renderLessonContent(activeLesson.data.content ?? "")}
+                    <Separator />
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="text-xs text-muted-foreground">
+                        {activeLesson.data.type === "exercise" ? "Exercise" : "Lesson"}{" "}
+                        {activeLessonIndex >= 0 ? `• Item ${activeLessonIndex + 1} of ${activeLessons.length}` : ""}
+                      </div>
+                      <Button
+                        onClick={() => void markLessonComplete(activeLesson.id)}
+                        disabled={completedLessonIds.has(activeLesson.id)}
+                      >
+                        {completedLessonIds.has(activeLesson.id) ? "Completed" : "Mark complete"}
+                      </Button>
+                    </div>
+                  </>
+                )}
+
+                <Accordion type="single" collapsible>
+                  <AccordionItem value="resources">
+                    <AccordionTrigger>Resources</AccordionTrigger>
+                    <AccordionContent>
+                      {resources.length === 0 && <div className="text-sm text-muted-foreground">No resources yet.</div>}
+                      {resources.length > 0 && (
+                        <div className="space-y-2">
+                          {resources.map((r) => (
+                            <Card key={r.id}>
+                              <CardContent className="p-4 space-y-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-semibold text-foreground truncate">{r.data.title ?? "Resource"}</div>
+                                    {r.data.description && (
+                                      <div className="text-xs text-muted-foreground mt-1">{r.data.description}</div>
+                                    )}
+                                  </div>
+                                  {r.data.url ? (
+                                    <a className="text-xs text-primary hover:underline" href={r.data.url} target="_blank" rel="noreferrer">
+                                      Open link
+                                    </a>
+                                  ) : (
+                                    <Badge variant="outline">Read</Badge>
+                                  )}
+                                </div>
+
+                                {r.data.content && (
+                                  <div className="text-sm text-muted-foreground whitespace-pre-wrap">{r.data.content}</div>
+                                )}
+
+                                {!r.data.content && r.data.url && (
+                                  <div className="text-xs text-muted-foreground break-all">{r.data.url}</div>
+                                )}
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </div>
+                      )}
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
               </CardContent>
             </Card>
           </div>

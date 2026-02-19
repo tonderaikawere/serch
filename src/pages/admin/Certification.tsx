@@ -4,6 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScoreRing } from "@/components/ui/score-ring";
+import { useEffect, useMemo, useState } from "react";
+import { collection, getDocs, orderBy, query } from "firebase/firestore";
+import { firestore } from "@/lib/firebase";
 import { 
   Award, 
   Download, 
@@ -36,6 +39,50 @@ const completedScenarios = [
 export default function Certification() {
   const overallScore = 82;
   const shareableLink = "https://seo-trainer.app/cert/abc123xyz";
+
+  const [courses, setCourses] = useState<Array<{ id: string; title: string | null; modules: Array<{ id: string; title: string | null; order: number | null }> }>>([]);
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setCoursesLoading(true);
+      setCoursesError(null);
+      try {
+        const coursesSnap = await getDocs(collection(firestore, "courses"));
+        const rows = await Promise.all(
+          coursesSnap.docs.map(async (c) => {
+            const cData = c.data() as { title?: string };
+            const modulesRef = collection(firestore, "courses", c.id, "modules");
+            let modulesSnap;
+            try {
+              modulesSnap = await getDocs(query(modulesRef, orderBy("order", "asc")));
+            } catch {
+              modulesSnap = await getDocs(modulesRef);
+            }
+            const modules = modulesSnap.docs.map((m) => {
+              const mData = m.data() as { title?: string; order?: number };
+              return { id: m.id, title: mData.title ?? null, order: typeof mData.order === "number" ? mData.order : null };
+            });
+            return { id: c.id, title: cData.title ?? null, modules };
+          }),
+        );
+        if (!cancelled) setCourses(rows);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!cancelled) setCoursesError(msg);
+      } finally {
+        if (!cancelled) setCoursesLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const totalModules = useMemo(() => courses.reduce((sum, c) => sum + c.modules.length, 0), [courses]);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(shareableLink);
@@ -143,6 +190,46 @@ export default function Certification() {
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-primary" />
+                Learning Modules
+              </CardTitle>
+              <CardDescription>The curriculum content included in your certificates</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {coursesLoading && <div className="text-sm text-muted-foreground">Loading…</div>}
+              {!coursesLoading && coursesError && <div className="text-sm text-muted-foreground break-words">{coursesError}</div>}
+              {!coursesLoading && !coursesError && courses.length === 0 && (
+                <div className="text-sm text-muted-foreground">No courses found.</div>
+              )}
+
+              {!coursesLoading && !coursesError && courses.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-xs text-muted-foreground">Total modules: {totalModules}</div>
+                  {courses.map((c) => (
+                    <div key={c.id} className="rounded-lg border border-border p-4">
+                      <div className="font-medium text-foreground">{c.title ?? "Course"}</div>
+                      <div className="text-xs text-muted-foreground mt-1">Modules: {c.modules.length}</div>
+                      <div className="mt-3 grid sm:grid-cols-2 gap-2">
+                        {c.modules.slice(0, 8).map((m) => (
+                          <div key={m.id} className="rounded-lg bg-muted/30 p-2">
+                            <div className="text-xs text-muted-foreground">Module {m.order ?? "—"}</div>
+                            <div className="text-sm font-medium text-foreground truncate">{m.title ?? "Module"}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {c.modules.length > 8 && (
+                        <div className="text-xs text-muted-foreground mt-3">+{c.modules.length - 8} more modules</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Skill Breakdown */}
           <Card>
             <CardHeader>

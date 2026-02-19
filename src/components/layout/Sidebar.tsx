@@ -33,7 +33,6 @@ const studentNav: NavItem[] = [
   { icon: Zap, label: "Technical SEO", path: "/students/technical" },
   { icon: Search, label: "Search Simulation", path: "/students/search-sim" },
   { icon: BarChart3, label: "Performance", path: "/students/performance" },
-  { icon: GraduationCap, label: "Learning Modules", path: "/students/learning" },
   { icon: MessageSquare, label: "Chat", path: "/students/chats" },
   { icon: Settings, label: "Settings", path: "/students/settings" },
   { icon: Settings, label: "Profile", path: "/students/profile" },
@@ -47,7 +46,6 @@ const studentNavGroups: Array<{ id: string; label: string; items: NavItem[] }> =
       { icon: Home, label: "Dashboard", path: "/students/dashboard" },
       { icon: BookOpen, label: "Courses", path: "/students/courses" },
       { icon: BarChart3, label: "Performance", path: "/students/performance" },
-      { icon: GraduationCap, label: "Learning Modules", path: "/students/learning" },
       { icon: MessageSquare, label: "Chat", path: "/students/chats" },
     ],
   },
@@ -242,7 +240,7 @@ export function Sidebar({
         <div className={cn("p-2 space-y-2", collapsed && !isMobile && "px-2")}>
           {profile?.role !== "admin" && (
             <Link
-              to={profile?.role === "instructor" ? "/instructors" : "/students/learning"}
+              to={profile?.role === "instructor" ? "/instructors/courses" : "/students/courses"}
               onClick={closeMobile}
               className={cn(
                 "flex items-center gap-3 px-3 py-2.5 rounded-lg bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent/80 transition-colors",
@@ -250,7 +248,7 @@ export function Sidebar({
               )}
             >
               <BookOpen className="w-5 h-5" />
-              {(!collapsed || isMobile) && <span className="font-medium text-sm">Learning Modules</span>}
+              {(!collapsed || isMobile) && <span className="font-medium text-sm">Courses</span>}
             </Link>
           )}
 

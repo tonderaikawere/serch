@@ -9,7 +9,11 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-6">
-        <div className="text-sm text-muted-foreground">Loading…</div>
+        <div className="flex flex-col items-center gap-4">
+          <img src="/favicon.svg" alt="Serch" className="h-12 w-12" />
+          <div className="text-lg font-semibold text-foreground animate-bounce">Serch</div>
+          <div className="text-sm text-muted-foreground">Loading…</div>
+        </div>
       </div>
     );
   }

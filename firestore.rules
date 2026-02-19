@@ -69,13 +69,17 @@ service cloud.firestore {
     function requesterHub() {
       return getHubFromCanonicalProfile(request.auth.uid) != null
         ? getHubFromCanonicalProfile(request.auth.uid)
-        : get(/databases/$(database)/documents/users/$(request.auth.uid)).data.hub;
+        : (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.hub
+          : null);
     }
 
     function targetHub(uid) {
       return getHubFromCanonicalProfile(uid) != null
         ? getHubFromCanonicalProfile(uid)
-        : get(/databases/$(database)/documents/users/$(uid)).data.hub;
+        : (exists(/databases/$(database)/documents/users/$(uid))
+          ? get(/databases/$(database)/documents/users/$(uid)).data.hub
+          : null);
     }
 
     function sameHub(uid) {
