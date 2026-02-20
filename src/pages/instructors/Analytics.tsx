@@ -7,6 +7,20 @@ import { collection, getDocs, limit, orderBy, query, where } from "firebase/fire
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
+function isFirestoreMissingIndexError(message: string) {
+  return message.toLowerCase().includes("requires an index");
+}
+
+function friendlyFirestoreError(message: string) {
+  if (isFirestoreMissingIndexError(message)) {
+    return {
+      title: "Setup needed",
+      body: "Your database needs a Firestore index for this view. Analytics will still load, but some sorting may be limited.",
+    };
+  }
+  return { title: "Something went wrong", body: message };
+}
+
 export default function InstructorAnalytics() {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
@@ -16,6 +30,7 @@ export default function InstructorAnalytics() {
   const [assessments, setAssessments] = useState<AssessmentRow[]>([]);
   const [activitySeries, setActivitySeries] = useState<Array<{ day: string; events: number }>>([]);
   const [assessmentSeries, setAssessmentSeries] = useState<Array<{ day: string; created: number }>>([]);
+  const [monthlySeries, setMonthlySeries] = useState<Array<{ month: string; events: number; assessments: number }>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +40,7 @@ export default function InstructorAnalytics() {
       setAssessments([]);
       setActivitySeries([]);
       setAssessmentSeries([]);
+      setMonthlySeries([]);
       setLoading(false);
       return;
     }
@@ -51,9 +67,13 @@ export default function InstructorAnalytics() {
           };
         });
 
-        const assessSnap = await getDocs(
-          query(collection(firestore, "assessments"), where("hub", "==", hub), orderBy("createdAt", "desc"), limit(200)),
-        );
+        const baseAssess = query(collection(firestore, "assessments"), where("hub", "==", hub), limit(200));
+        let assessSnap;
+        try {
+          assessSnap = await getDocs(query(baseAssess, orderBy("createdAt", "desc")));
+        } catch {
+          assessSnap = await getDocs(baseAssess);
+        }
         const nextAssessments: AssessmentRow[] = assessSnap.docs.map((d) => {
           const data = d.data() as {
             title?: string;
@@ -76,6 +96,7 @@ export default function InstructorAnalytics() {
 
         const now = Date.now();
         const oldest = now - 1000 * 60 * 60 * 24 * 14;
+        const oldestMonth = now - 1000 * 60 * 60 * 24 * 31 * 6;
 
         const byDayEvents = new Map<string, number>();
         await Promise.all(
@@ -91,9 +112,11 @@ export default function InstructorAnalytics() {
             eventsSnap.forEach((d) => {
               const data = d.data() as { createdAt?: unknown };
               const ms = createdAtToMillis(data.createdAt);
-              if (ms == null || ms < oldest) return;
-              const key = formatDayKey(ms);
-              byDayEvents.set(key, (byDayEvents.get(key) ?? 0) + 1);
+              if (ms == null) return;
+              if (ms >= oldest) {
+                const key = formatDayKey(ms);
+                byDayEvents.set(key, (byDayEvents.get(key) ?? 0) + 1);
+              }
             });
           }),
         );
@@ -101,9 +124,42 @@ export default function InstructorAnalytics() {
         const byDayAssessments = new Map<string, number>();
         nextAssessments.forEach((a) => {
           const ms = createdAtToMillis(a.createdAt);
-          if (ms == null || ms < oldest) return;
-          const key = formatDayKey(ms);
-          byDayAssessments.set(key, (byDayAssessments.get(key) ?? 0) + 1);
+          if (ms == null) return;
+          if (ms >= oldest) {
+            const key = formatDayKey(ms);
+            byDayAssessments.set(key, (byDayAssessments.get(key) ?? 0) + 1);
+          }
+        });
+
+        const byMonthEvents = new Map<string, number>();
+        const byMonthAssess = new Map<string, number>();
+
+        // reuse the event fetch results already loaded in the 14-day loop by re-fetching a bit more if needed (simple + safe)
+        await Promise.all(
+          nextStudents.map(async (s) => {
+            const eventsRef = collection(firestore, "students", s.uid, "events");
+            let eventsSnap;
+            try {
+              const qEvents = query(eventsRef, orderBy("createdAt", "desc"), limit(250));
+              eventsSnap = await getDocs(qEvents);
+            } catch {
+              eventsSnap = await getDocs(eventsRef);
+            }
+            eventsSnap.forEach((d) => {
+              const data = d.data() as { createdAt?: unknown };
+              const ms = createdAtToMillis(data.createdAt);
+              if (ms == null || ms < oldestMonth) return;
+              const key = formatMonthKey(ms);
+              byMonthEvents.set(key, (byMonthEvents.get(key) ?? 0) + 1);
+            });
+          }),
+        );
+
+        nextAssessments.forEach((a) => {
+          const ms = createdAtToMillis(a.createdAt);
+          if (ms == null || ms < oldestMonth) return;
+          const key = formatMonthKey(ms);
+          byMonthAssess.set(key, (byMonthAssess.get(key) ?? 0) + 1);
         });
 
         const eventsSeries: Array<{ day: string; events: number }> = [];
@@ -115,11 +171,20 @@ export default function InstructorAnalytics() {
           assessSeries.push({ day: key.slice(5), created: byDayAssessments.get(key) ?? 0 });
         }
 
+        const monthSeries: Array<{ month: string; events: number; assessments: number }> = [];
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now);
+          d.setMonth(d.getMonth() - i);
+          const key = formatMonthKey(d.getTime());
+          monthSeries.push({ month: key, events: byMonthEvents.get(key) ?? 0, assessments: byMonthAssess.get(key) ?? 0 });
+        }
+
         if (cancelled) return;
         setStudents(nextStudents);
         setAssessments(nextAssessments);
         setActivitySeries(eventsSeries);
         setAssessmentSeries(assessSeries);
+        setMonthlySeries(monthSeries);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (!cancelled) setError(msg);
@@ -179,7 +244,14 @@ export default function InstructorAnalytics() {
         )}
 
         {profile?.hub && loading && <div className="text-sm text-muted-foreground">Loading…</div>}
-        {profile?.hub && !loading && error && <div className="text-sm text-muted-foreground break-words">{error}</div>}
+        {profile?.hub && !loading && error && (
+          <Card>
+            <CardContent className="p-4 space-y-2">
+              <div className="font-medium text-foreground">{friendlyFirestoreError(error).title}</div>
+              <div className="text-sm text-muted-foreground">{friendlyFirestoreError(error).body}</div>
+            </CardContent>
+          </Card>
+        )}
 
         {profile?.hub && !loading && !error && (
           <>
@@ -213,6 +285,70 @@ export default function InstructorAnalytics() {
                   <div className="text-lg font-medium text-foreground">
                     {avgAssessmentScore == null ? "—" : avgAssessmentScore.toFixed(1)}
                   </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-6">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Monthly activity (6 months)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {monthlySeries.every((x) => x.events === 0) ? (
+                    <div className="text-sm text-muted-foreground">No activity events yet.</div>
+                  ) : (
+                    <ChartContainer
+                      className="h-[260px] w-full"
+                      config={{
+                        events: {
+                          label: "Events",
+                          color: "hsl(var(--primary))",
+                        },
+                      }}
+                    >
+                      <ResponsiveContainer>
+                        <BarChart data={monthlySeries} margin={{ left: 8, right: 8 }}>
+                          <CartesianGrid vertical={false} />
+                          <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                          <YAxis width={32} tickLine={false} axisLine={false} />
+                          <ChartTooltip content={<ChartTooltipContent />} />
+                          <Bar dataKey="events" fill="var(--color-events)" radius={[6, 6, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </ChartContainer>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Monthly assessments (6 months)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {monthlySeries.every((x) => x.assessments === 0) ? (
+                    <div className="text-sm text-muted-foreground">No assessments created yet.</div>
+                  ) : (
+                    <ChartContainer
+                      className="h-[260px] w-full"
+                      config={{
+                        assessments: {
+                          label: "Assessments",
+                          color: "hsl(var(--primary))",
+                        },
+                      }}
+                    >
+                      <ResponsiveContainer>
+                        <LineChart data={monthlySeries} margin={{ left: 8, right: 8 }}>
+                          <CartesianGrid vertical={false} />
+                          <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                          <YAxis width={32} tickLine={false} axisLine={false} />
+                          <ChartTooltip content={<ChartTooltipContent />} />
+                          <Line type="monotone" dataKey="assessments" stroke="var(--color-assessments)" strokeWidth={2} dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </ChartContainer>
+                  )}
                 </CardContent>
               </Card>
             </div>
@@ -369,4 +505,11 @@ function formatDayKey(ms: number) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function formatMonthKey(ms: number) {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
 }

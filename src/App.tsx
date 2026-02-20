@@ -28,6 +28,7 @@ import StudentCourses from "./pages/students/Courses";
 import StudentCourseDetails from "./pages/students/CourseDetails";
 import StudentCoursePlayer from "./pages/students/CoursePlayer";
 import StudentFinalExam from "./pages/students/FinalExam";
+import StudentAssessments from "./pages/students/Assessments";
 import Settings from "./pages/admin/Settings";
 import Certification from "./pages/admin/Certification";
 import NotFound from "./pages/NotFound";
@@ -227,6 +228,16 @@ const App = () => (
                   <RequireAuth>
                     <RequireRole allow={["student", "admin"]}>
                       <Performance />
+                    </RequireRole>
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/students/assessments"
+                element={
+                  <RequireAuth>
+                    <RequireRole allow={["student", "admin"]}>
+                      <StudentAssessments />
                     </RequireRole>
                   </RequireAuth>
                 }

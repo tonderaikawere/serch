@@ -45,6 +45,7 @@ const studentNavGroups: Array<{ id: string; label: string; items: NavItem[] }> =
     items: [
       { icon: Home, label: "Dashboard", path: "/students/dashboard" },
       { icon: BookOpen, label: "Courses", path: "/students/courses" },
+      { icon: GraduationCap, label: "Assessments", path: "/students/assessments" },
       { icon: BarChart3, label: "Performance", path: "/students/performance" },
       { icon: MessageSquare, label: "Chat", path: "/students/chats" },
     ],

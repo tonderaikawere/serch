@@ -10,11 +10,27 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useAuth } from "@/contexts/AuthContext";
 import { firestore } from "@/lib/firebase";
 
+function isFirestoreMissingIndexError(message: string) {
+  return message.toLowerCase().includes("requires an index");
+}
+
+function friendlyFirestoreError(message: string) {
+  if (isFirestoreMissingIndexError(message)) {
+    return {
+      title: "Setup needed",
+      body: "Your database needs a Firestore index for this view. The page will still load, but sorting may be limited.",
+    };
+  }
+  return { title: "Something went wrong", body: message };
+}
+
 export default function InstructorAssessments() {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [assessments, setAssessments] = useState<AssessmentRow[]>([]);
+
+  const [creating, setCreating] = useState(false);
 
   const [studentsLoading, setStudentsLoading] = useState(false);
   const [studentsError, setStudentsError] = useState<string | null>(null);
@@ -27,6 +43,8 @@ export default function InstructorAssessments() {
   const [newSummary, setNewSummary] = useState("");
   const [newScore, setNewScore] = useState<string>("");
 
+  const [openId, setOpenId] = useState<string | null>(null);
+
   const [studentLookup, setStudentLookup] = useState<Record<string, StudentRow>>({});
 
   useEffect(() => {
@@ -38,17 +56,18 @@ export default function InstructorAssessments() {
       return;
     }
 
-    (async () => {
+    async function loadAssessments() {
       setLoading(true);
       setError(null);
       try {
-        const q = query(
-          collection(firestore, "assessments"),
-          where("hub", "==", hub),
-          orderBy("createdAt", "desc"),
-          limit(100),
-        );
-        const snap = await getDocs(q);
+        const base = query(collection(firestore, "assessments"), where("hub", "==", hub), limit(100));
+        let snap;
+        try {
+          snap = await getDocs(query(base, orderBy("createdAt", "desc")));
+        } catch {
+          snap = await getDocs(base);
+        }
+
         const next: AssessmentRow[] = snap.docs.map((d) => {
           const data = d.data() as AssessmentDoc;
           return {
@@ -69,8 +88,9 @@ export default function InstructorAssessments() {
       } finally {
         if (!cancelled) setLoading(false);
       }
-    })();
+    }
 
+    void loadAssessments();
     return () => {
       cancelled = true;
     };
@@ -125,6 +145,11 @@ export default function InstructorAssessments() {
     });
   }, [assessments, searchTerm, studentLookup]);
 
+  const openAssessment = useMemo(() => {
+    if (!openId) return null;
+    return assessments.find((a) => a.id === openId) ?? null;
+  }, [assessments, openId]);
+
   async function createAssessment() {
     const hub = profile?.hub;
     const instructorUid = profile?.uid;
@@ -138,30 +163,53 @@ export default function InstructorAssessments() {
 
     if (!studentUid || !title) return;
 
-    const created = await addDoc(collection(firestore, "assessments"), {
-      hub,
-      studentUid,
-      instructorUid,
-      title,
-      summary,
-      score,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    setCreating(true);
+    try {
+      if (studentUid === "__all__") {
+        const hubStudents = students.filter((s) => s.hub === hub);
+        await Promise.all(
+          hubStudents.map((s) =>
+            addDoc(collection(firestore, "assessments"), {
+              hub,
+              studentUid: s.uid,
+              instructorUid,
+              title,
+              summary,
+              score,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            }),
+          ),
+        );
+      } else {
+        const created = await addDoc(collection(firestore, "assessments"), {
+          hub,
+          studentUid,
+          instructorUid,
+          title,
+          summary,
+          score,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
 
-    setAssessments((prev) => [
-      {
-        id: created.id,
-        hub,
-        studentUid,
-        instructorUid,
-        title,
-        summary,
-        score,
-        createdAt: Date.now(),
-      },
-      ...prev,
-    ]);
+        setAssessments((prev) => [
+          {
+            id: created.id,
+            hub,
+            studentUid,
+            instructorUid,
+            title,
+            summary,
+            score,
+            createdAt: Date.now(),
+          },
+          ...prev,
+        ]);
+      }
+    } finally {
+      setCreating(false);
+    }
 
     setNewStudentUid("");
     setNewTitle("");
@@ -200,6 +248,7 @@ export default function InstructorAssessments() {
                           <SelectValue placeholder="Select a student" />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="__all__">All students in hub</SelectItem>
                           {students.map((s) => (
                             <SelectItem key={s.uid} value={s.uid}>
                               {s.displayName ?? s.email ?? s.uid}
@@ -230,7 +279,7 @@ export default function InstructorAssessments() {
                   </div>
 
                   <DialogFooter>
-                    <Button onClick={() => void createAssessment()} disabled={!newStudentUid || !newTitle.trim()}>
+                    <Button onClick={() => void createAssessment()} disabled={!newStudentUid || !newTitle.trim() || creating}>
                       Create
                     </Button>
                   </DialogFooter>
@@ -253,7 +302,14 @@ export default function InstructorAssessments() {
             )}
 
             {profile?.hub && loading && <div className="text-sm text-muted-foreground">Loading…</div>}
-            {profile?.hub && !loading && error && <div className="text-sm text-muted-foreground break-words">{error}</div>}
+            {profile?.hub && !loading && error && (
+              <Card className="border-border">
+                <CardContent className="p-4 space-y-2">
+                  <div className="font-medium text-foreground">{friendlyFirestoreError(error).title}</div>
+                  <div className="text-sm text-muted-foreground">{friendlyFirestoreError(error).body}</div>
+                </CardContent>
+              </Card>
+            )}
 
             {profile?.hub && !loading && !error && filtered.length === 0 && (
               <div className="text-sm text-muted-foreground">No assessments yet.</div>
@@ -263,26 +319,51 @@ export default function InstructorAssessments() {
               <div className="space-y-3">
                 {filtered.map((a) => {
                   const student = a.studentUid ? studentLookup[a.studentUid] : undefined;
+                  const brief = (a.summary ?? "").trim().slice(0, 120);
                   return (
                     <div key={a.id} className="rounded-lg border border-border p-4">
                       <div className="flex items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="font-medium text-foreground truncate">{a.title ?? "Assessment"}</div>
                           <div className="text-sm text-muted-foreground mt-1">
-                            Student: {student?.displayName ?? student?.email ?? a.studentUid ?? "—"}
+                            Sent to: {student?.displayName ?? student?.email ?? a.studentUid ?? "—"}
+                          </div>
+                          <div className="text-sm text-muted-foreground mt-2">
+                            {brief ? `${brief}${(a.summary ?? "").trim().length > brief.length ? "…" : ""}` : "No overview yet."}
                           </div>
                         </div>
-                        <div className="text-sm text-muted-foreground">
-                          {typeof a.score === "number" ? `Score: ${a.score}` : ""}
+                        <div className="flex flex-col items-end gap-2">
+                          <div className="text-sm text-muted-foreground">{typeof a.score === "number" ? `Score: ${a.score}` : ""}</div>
+                          <Button type="button" size="sm" variant="outline" onClick={() => setOpenId(a.id)}>
+                            Open
+                          </Button>
                         </div>
                       </div>
-                      {a.summary && <div className="text-sm text-muted-foreground mt-3 whitespace-pre-wrap">{a.summary}</div>}
-                      <div className="text-xs text-muted-foreground mt-3">ID: {a.id}</div>
                     </div>
                   );
                 })}
               </div>
             )}
+
+            <Dialog open={!!openId} onOpenChange={(v) => (v ? null : setOpenId(null))}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>{openAssessment?.title ?? "Assessment"}</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3">
+                  <div className="text-sm text-muted-foreground">
+                    Sent to: {openAssessment?.studentUid ? (studentLookup[openAssessment.studentUid]?.displayName ?? studentLookup[openAssessment.studentUid]?.email ?? openAssessment.studentUid) : "—"}
+                  </div>
+                  {typeof openAssessment?.score === "number" ? (
+                    <div className="text-sm text-muted-foreground">Score: {openAssessment.score}</div>
+                  ) : null}
+                  <div className="text-sm text-muted-foreground whitespace-pre-wrap">
+                    {(openAssessment?.summary ?? "").trim() || "No report content yet."}
+                  </div>
+                  <div className="text-xs text-muted-foreground">ID: {openAssessment?.id ?? "—"}</div>
+                </div>
+              </DialogContent>
+            </Dialog>
           </CardContent>
         </Card>
       </div>
