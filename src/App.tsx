@@ -26,6 +26,7 @@ import MetadataEditor from "./pages/students/MetadataEditor";
 import Performance from "./pages/students/Performance";
 import StudentCourses from "./pages/students/Courses";
 import StudentCourseDetails from "./pages/students/CourseDetails";
+import StudentCoursePlayer from "./pages/students/CoursePlayer";
 import StudentFinalExam from "./pages/students/FinalExam";
 import Settings from "./pages/admin/Settings";
 import Certification from "./pages/admin/Certification";
@@ -58,7 +59,12 @@ const App = () => (
         <TooltipProvider>
           <Toaster />
           <Sonner />
-          <BrowserRouter>
+          <BrowserRouter
+            future={{
+              v7_startTransition: true,
+              v7_relativeSplatPath: true,
+            }}
+          >
             <Routes>
               {/* Guest */}
               <Route path="/" element={<Landing />} />
@@ -121,6 +127,16 @@ const App = () => (
                   <RequireAuth>
                     <RequireRole allow={["student", "admin"]}>
                       <StudentCourseDetails />
+                    </RequireRole>
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/students/courses/:courseId/player"
+                element={
+                  <RequireAuth>
+                    <RequireRole allow={["student", "admin"]}>
+                      <StudentCoursePlayer />
                     </RequireRole>
                   </RequireAuth>
                 }

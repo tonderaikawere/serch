@@ -47,7 +47,7 @@ export default function Landing() {
             SEO training that feels like real work
           </h1>
           <p className="text-lg text-primary-foreground/70 max-w-2xl mb-10">
-            A practical training platform for SEO, digital marketing, and technical optimization. Built with industry workflows.
+            Serch is an international company based in Bulawayo, Zimbabwe, working with institutes to provide portals for students and instructors—making learning and management easy for everyone.
           </p>
 
           <div className="grid md:grid-cols-3 gap-6 w-full max-w-5xl">
@@ -79,7 +79,7 @@ export default function Landing() {
           )}
         </main>
 
-        <footer className="text-center text-primary-foreground/40 text-sm mt-8">We work with uncommon.org</footer>
+        <footer className="text-center text-primary-foreground/40 text-sm mt-8">Built in Bulawayo, Zimbabwe</footer>
       </div>
     </div>
   );

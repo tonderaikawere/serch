@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/contexts/AuthContext";
 import { firestore } from "@/lib/firebase";
-import { addDoc, collection, doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import { 
   FileText, 
   Link2, 
@@ -21,16 +21,21 @@ import {
   Search,
   Copy
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export default function MetadataEditor() {
   const { profile } = useAuth();
+  const uid = profile?.uid ?? null;
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [slug, setSlug] = useState("");
   const [indexable, setIndexable] = useState(true);
   const [canonicalEnabled, setCanonicalEnabled] = useState(true);
   const [canonicalUrl, setCanonicalUrl] = useState("");
+
+  const [score, setScore] = useState(0);
+  const [completed, setCompleted] = useState(false);
+  const lastCompletionRef = useRef(false);
 
   const titleLength = title.length;
   const descriptionLength = description.length;
@@ -60,6 +65,18 @@ export default function MetadataEditor() {
     { label: "Description length optimal (120-160 chars)", passed: descriptionLength >= 120 && descriptionLength <= 160 },
     { label: "URL is SEO-friendly", passed: slug.length > 0 && !slug.includes(" ") },
     { label: "Page is indexable", passed: indexable },
+    {
+      label: "Canonical URL is valid (when enabled)",
+      passed: !canonicalEnabled || (() => {
+        if (!canonicalUrl.trim()) return false;
+        try {
+          const u = new URL(canonicalUrl.trim());
+          return u.protocol === "https:" || u.protocol === "http:";
+        } catch {
+          return false;
+        }
+      })(),
+    },
   ];
 
   const passedChecks = validationChecks.filter(c => c.passed).length;
@@ -69,7 +86,6 @@ export default function MetadataEditor() {
   }\n${canonicalEnabled && canonicalUrl ? `<link rel="canonical" href="${canonicalUrl}" />` : ""}`;
 
   const logEvent = (type: string, label: string) => {
-    const uid = profile?.uid;
     if (!uid) return;
     void addDoc(collection(firestore, "students", uid, "events"), {
       type,
@@ -78,9 +94,155 @@ export default function MetadataEditor() {
     }).catch(() => {});
   };
 
+  const computedScore = useMemo(() => {
+    if (validationChecks.length === 0) return 0;
+    return Math.round((passedChecks / validationChecks.length) * 100);
+  }, [passedChecks, validationChecks.length]);
+
+  const computedCompleted = useMemo(() => {
+    return validationChecks.length > 0 && passedChecks === validationChecks.length;
+  }, [passedChecks, validationChecks.length]);
+
+  const suggestions = useMemo(() => {
+    const list: Array<{ label: string; suggestion: string }> = [];
+
+    if (title.length === 0) {
+      list.push({ label: "Title tag present", suggestion: "Add a clear page title (include your primary keyword near the start)." });
+    } else if (titleLength < 30) {
+      list.push({ label: "Title length optimal (30-60 chars)", suggestion: "Expand the title to 30–60 characters to better describe the page." });
+    } else if (titleLength > 60) {
+      list.push({ label: "Title length optimal (30-60 chars)", suggestion: "Shorten the title to under 60 characters to avoid truncation in results." });
+    }
+
+    if (description.length === 0) {
+      list.push({ label: "Meta description present", suggestion: "Write a meta description summarizing the page value and include a simple call-to-action." });
+    } else if (descriptionLength < 120) {
+      list.push({ label: "Description length optimal (120-160 chars)", suggestion: "Expand the description to 120–160 characters to improve snippet quality." });
+    } else if (descriptionLength > 160) {
+      list.push({ label: "Description length optimal (120-160 chars)", suggestion: "Trim the description to under 160 characters to avoid truncation." });
+    }
+
+    if (slug.length === 0) {
+      list.push({ label: "URL is SEO-friendly", suggestion: "Add a short slug using lowercase words separated by hyphens (e.g. \"technical-seo-checklist\")." });
+    } else if (slug.includes(" ")) {
+      list.push({ label: "URL is SEO-friendly", suggestion: "Remove spaces from the slug; use hyphens instead." });
+    }
+
+    if (!indexable) {
+      list.push({ label: "Page is indexable", suggestion: "Enable indexing unless this page is intentionally private/temporary." });
+    }
+
+    if (canonicalEnabled) {
+      const url = canonicalUrl.trim();
+      let ok = false;
+      if (url) {
+        try {
+          const u = new URL(url);
+          ok = u.protocol === "https:" || u.protocol === "http:";
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        list.push({ label: "Canonical URL is valid (when enabled)", suggestion: "Enter a valid canonical URL starting with https:// (recommended)." });
+      }
+    }
+
+    return list;
+  }, [canonicalEnabled, canonicalUrl, description.length, descriptionLength, indexable, slug, title.length, titleLength]);
+
+  async function persistWorkspace(next: {
+    title: string;
+    description: string;
+    slug: string;
+    indexable: boolean;
+    canonicalEnabled: boolean;
+    canonicalUrl: string;
+    generatedHtml: string;
+    score: number;
+    completed: boolean;
+  }) {
+    if (!uid) return;
+    await setDoc(
+      doc(firestore, "students", uid, "workspace", "metadata"),
+      {
+        ...next,
+        updatedAt: serverTimestamp(),
+        completedAt: next.completed ? serverTimestamp() : null,
+      },
+      { merge: true },
+    ).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!uid) return;
+    let cancelled = false;
+    void (async () => {
+      const ref = doc(firestore, "students", uid, "workspace", "metadata");
+      const snap = await getDoc(ref).catch(() => null);
+      if (cancelled || !snap || !snap.exists()) return;
+      const data = snap.data() as Partial<{
+        title: string;
+        description: string;
+        slug: string;
+        indexable: boolean;
+        canonicalEnabled: boolean;
+        canonicalUrl: string;
+        score: number;
+        completed: boolean;
+      }>;
+      if (typeof data.title === "string") setTitle(data.title);
+      if (typeof data.description === "string") setDescription(data.description);
+      if (typeof data.slug === "string") setSlug(data.slug);
+      if (typeof data.indexable === "boolean") setIndexable(data.indexable);
+      if (typeof data.canonicalEnabled === "boolean") setCanonicalEnabled(data.canonicalEnabled);
+      if (typeof data.canonicalUrl === "string") setCanonicalUrl(data.canonicalUrl);
+      if (typeof data.score === "number") setScore(data.score);
+      if (typeof data.completed === "boolean") {
+        setCompleted(data.completed);
+        lastCompletionRef.current = data.completed;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uid]);
+
+  useEffect(() => {
+    setScore(computedScore);
+    setCompleted(computedCompleted);
+
+    const handle = window.setTimeout(() => {
+      void persistWorkspace({
+        title,
+        description,
+        slug,
+        indexable,
+        canonicalEnabled,
+        canonicalUrl,
+        generatedHtml,
+        score: computedScore,
+        completed: computedCompleted,
+      });
+
+      if (computedCompleted && !lastCompletionRef.current) {
+        lastCompletionRef.current = true;
+        logEvent("metadata_completed", "Metadata Editor completed");
+      }
+      if (!computedCompleted) {
+        lastCompletionRef.current = false;
+      }
+    }, 500);
+
+    return () => {
+      window.clearTimeout(handle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, description, slug, indexable, canonicalEnabled, canonicalUrl, generatedHtml, computedScore, computedCompleted, uid]);
+
   return (
     <DashboardLayout>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* Header */}
         <div>
           <h1 className="text-3xl font-bold text-foreground">Metadata & URL Editor</h1>
@@ -281,9 +443,27 @@ export default function MetadataEditor() {
                     </span>
                   </div>
                 ))}
+
+                {suggestions.length > 0 && (
+                  <div className="pt-3 border-t border-border space-y-2">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                      <AlertTriangle className="w-4 h-4 text-warning" />
+                      Fix Suggestions
+                    </div>
+                    <div className="space-y-2">
+                      {suggestions.map((s) => (
+                        <div key={`${s.label}-${s.suggestion}`} className="text-xs text-muted-foreground">
+                          <span className="text-foreground">{s.label}:</span> {s.suggestion}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={!computedCompleted}
                   onClick={() => {
                     void navigator.clipboard?.writeText(generatedHtml);
                     const uid = profile?.uid;
@@ -309,6 +489,11 @@ export default function MetadataEditor() {
                   <Copy className="w-4 h-4 mr-2" />
                   Copy
                 </Button>
+                {!computedCompleted && (
+                  <div className="text-xs text-muted-foreground">
+                    Fix the items above to enable copying clean metadata.
+                  </div>
+                )}
                 <div className="pt-3 border-t border-border">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-medium">Overall Score</span>

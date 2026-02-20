@@ -20,7 +20,10 @@ import {
   Sparkles,
   Copy
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { firestore } from "@/lib/firebase";
+import { addDoc, collection, doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 
 const schemaTypes = [
   { 
@@ -55,6 +58,9 @@ interface FAQItem {
 }
 
 export default function SchemaBuilder() {
+  const { profile } = useAuth();
+  const uid = profile?.uid ?? null;
+
   const [selectedType, setSelectedType] = useState("faq");
   const [faqItems, setFaqItems] = useState<FAQItem[]>([
     { question: "", answer: "" }
@@ -73,21 +79,11 @@ export default function SchemaBuilder() {
     availability: "InStock"
   });
 
-  const addFaqItem = () => {
-    setFaqItems([...faqItems, { question: "", answer: "" }]);
-  };
+  const [completed, setCompleted] = useState(false);
+  const [score, setScore] = useState(0);
+  const lastCompletionRef = useRef(false);
 
-  const removeFaqItem = (index: number) => {
-    setFaqItems(faqItems.filter((_, i) => i !== index));
-  };
-
-  const updateFaqItem = (index: number, field: "question" | "answer", value: string) => {
-    const updated = [...faqItems];
-    updated[index][field] = value;
-    setFaqItems(updated);
-  };
-
-  const generateSchema = () => {
+  function generateSchema() {
     if (selectedType === "faq") {
       return {
         "@context": "https://schema.org",
@@ -127,25 +123,166 @@ export default function SchemaBuilder() {
         "availability": `https://schema.org/${productData.availability}`
       }
     };
+  }
+
+  const schema = useMemo(() => generateSchema(), [selectedType, faqItems, articleData, productData]);
+
+  async function persistWorkspace(next: {
+    selectedType: string;
+    faqItems: FAQItem[];
+    articleData: typeof articleData;
+    productData: typeof productData;
+    score: number;
+    completed: boolean;
+  }) {
+    if (!uid) return;
+    await setDoc(
+      doc(firestore, "students", uid, "workspace", "schema"),
+      {
+        ...next,
+        updatedAt: serverTimestamp(),
+        completedAt: next.completed ? serverTimestamp() : null,
+      },
+      { merge: true },
+    ).catch(() => {});
+  }
+
+  async function logEvent(type: string, label: string, meta?: Record<string, unknown>) {
+    if (!uid) return;
+    await addDoc(collection(firestore, "students", uid, "events"), {
+      type,
+      label,
+      meta: meta ?? {},
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!uid) return;
+    let cancelled = false;
+    void (async () => {
+      const ref = doc(firestore, "students", uid, "workspace", "schema");
+      const snap = await getDoc(ref).catch(() => null);
+      if (cancelled || !snap || !snap.exists()) return;
+      const data = snap.data() as Partial<{
+        selectedType: string;
+        faqItems: FAQItem[];
+        articleData: typeof articleData;
+        productData: typeof productData;
+        score: number;
+        completed: boolean;
+      }>;
+      if (typeof data.selectedType === "string") setSelectedType(data.selectedType);
+      if (Array.isArray(data.faqItems) && data.faqItems.length > 0) setFaqItems(data.faqItems);
+      if (data.articleData && typeof data.articleData === "object") setArticleData({ ...articleData, ...(data.articleData as typeof articleData) });
+      if (data.productData && typeof data.productData === "object") setProductData({ ...productData, ...(data.productData as typeof productData) });
+      if (typeof data.score === "number") setScore(data.score);
+      if (typeof data.completed === "boolean") {
+        setCompleted(data.completed);
+        lastCompletionRef.current = data.completed;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid]);
+
+  const addFaqItem = () => {
+    setFaqItems([...faqItems, { question: "", answer: "" }]);
   };
 
-  const validationResults = [
-    { label: "Valid JSON-LD structure", passed: true },
-    { label: "Required fields present", passed: selectedType === "faq" ? faqItems.some(f => f.question && f.answer) : true },
-    { label: "Schema.org vocabulary", passed: true },
-    { label: "No deprecated properties", passed: true },
-  ];
+  const removeFaqItem = (index: number) => {
+    setFaqItems(faqItems.filter((_, i) => i !== index));
+  };
 
-  const passedValidations = validationResults.filter(v => v.passed).length;
+  const updateFaqItem = (index: number, field: "question" | "answer", value: string) => {
+    const updated = [...faqItems];
+    updated[index][field] = value;
+    setFaqItems(updated);
+  };
+
+
+  const validationResults = useMemo(() => {
+    const hasContext = (schema as Record<string, unknown>)["@context"] === "https://schema.org";
+    const hasType = typeof (schema as Record<string, unknown>)["@type"] === "string";
+
+    if (selectedType === "faq") {
+      const validPairs = faqItems.filter((f) => f.question.trim() && f.answer.trim());
+      const hasAtLeastOne = validPairs.length >= 1;
+      const questionsShort = validPairs.every((f) => f.question.trim().length <= 200);
+      return [
+        { label: "JSON-LD has @context and @type", passed: hasContext && hasType },
+        { label: "At least 1 complete Q&A", passed: hasAtLeastOne },
+        { label: "Questions are concise (≤ 200 chars)", passed: hasAtLeastOne ? questionsShort : false },
+      ];
+    }
+
+    if (selectedType === "article") {
+      const headlineOk = articleData.headline.trim().length >= 10;
+      const authorOk = articleData.author.trim().length >= 2;
+      const dateOk = Boolean(articleData.datePublished);
+      const descOk = articleData.description.trim().length >= 50;
+      return [
+        { label: "JSON-LD has @context and @type", passed: hasContext && hasType },
+        { label: "Headline provided (≥ 10 chars)", passed: headlineOk },
+        { label: "Author name provided", passed: authorOk },
+        { label: "Publish date provided", passed: dateOk },
+        { label: "Description provided (≥ 50 chars)", passed: descOk },
+      ];
+    }
+
+    const nameOk = productData.name.trim().length >= 2;
+    const priceNum = Number(productData.price);
+    const priceOk = Number.isFinite(priceNum) && priceNum > 0;
+    const currencyOk = /^[A-Z]{3}$/.test(productData.currency.trim().toUpperCase());
+    const descOk = productData.description.trim().length >= 30;
+    return [
+      { label: "JSON-LD has @context and @type", passed: hasContext && hasType },
+      { label: "Product name provided", passed: nameOk },
+      { label: "Price is a positive number", passed: priceOk },
+      { label: "Currency is a valid ISO code (e.g. USD)", passed: currencyOk },
+      { label: "Description provided (≥ 30 chars)", passed: descOk },
+    ];
+  }, [articleData, faqItems, productData, schema, selectedType]);
+
+  const passedValidations = useMemo(() => validationResults.filter((v) => v.passed).length, [validationResults]);
+  const computedScore = useMemo(() => {
+    if (validationResults.length === 0) return 0;
+    return Math.round((passedValidations / validationResults.length) * 100);
+  }, [passedValidations, validationResults.length]);
+
+  useEffect(() => {
+    setScore(computedScore);
+    const nextCompleted = validationResults.length > 0 && passedValidations === validationResults.length;
+    setCompleted(nextCompleted);
+    void persistWorkspace({
+      selectedType,
+      faqItems,
+      articleData,
+      productData,
+      score: computedScore,
+      completed: nextCompleted,
+    });
+
+    if (nextCompleted && !lastCompletionRef.current) {
+      lastCompletionRef.current = true;
+      void logEvent("schema_completed", "Schema Builder completed", { type: selectedType, score: computedScore });
+    }
+    if (!nextCompleted) {
+      lastCompletionRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computedScore, passedValidations, selectedType, faqItems, articleData, productData, validationResults.length, uid]);
 
   return (
     <DashboardLayout>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* Header */}
-        <div>
+        <div className="flex flex-col sm:flex-row items-center justify-between">
           <h1 className="text-3xl font-bold text-foreground">Structured Data Builder</h1>
-          <p className="text-muted-foreground mt-1">
-            Create schema markup for enhanced search results
+          <p className="text-muted-foreground mt-1 sm:mt-0">
+            Create structured data markup to enhance your search results
           </p>
         </div>
 
@@ -364,7 +501,14 @@ export default function SchemaBuilder() {
                     <FileJson className="w-5 h-5 text-primary" />
                     Generated JSON-LD
                   </CardTitle>
-                  <Button variant="outline" size="sm">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(JSON.stringify(schema, null, 2));
+                      void logEvent("schema_copied", "Schema JSON-LD copied", { type: selectedType, score: computedScore });
+                    }}
+                  >
                     <Copy className="w-4 h-4 mr-2" />
                     Copy
                   </Button>
@@ -373,7 +517,7 @@ export default function SchemaBuilder() {
               <CardContent>
                 <pre className="bg-muted/50 p-4 rounded-lg overflow-auto text-xs max-h-[300px]">
                   <code className="text-foreground">
-                    {JSON.stringify(generateSchema(), null, 2)}
+                    {JSON.stringify(schema, null, 2)}
                   </code>
                 </pre>
               </CardContent>

@@ -29,6 +29,12 @@ type CourseDoc = {
   description?: string;
   level?: "beginner" | "intermediate" | "advanced";
   topic?: "seo" | "aeo" | "seo+aeo";
+  thumbnailUrl?: string;
+  promoVideoUrl?: string;
+  durationHours?: number;
+  learnersCount?: number;
+  likesCount?: number;
+  certificateEnabled?: boolean;
   published?: boolean;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -48,6 +54,24 @@ type ResourceDoc = {
   description?: string;
   url?: string;
   content?: string;
+  blocks?: LessonBlock[];
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
+type LessonBlock =
+  | { type: "text"; markdown: string }
+  | { type: "image"; url: string; caption?: string }
+  | { type: "video"; url: string; title?: string }
+  | { type: "link"; url: string; title?: string; description?: string }
+  | { type: "divider" };
+
+type LessonDoc = {
+  title?: string;
+  type?: "lesson" | "exercise";
+  order?: number;
+  content?: string;
+  blocks?: LessonBlock[];
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -73,6 +97,13 @@ export default function InstructorCourseEditor() {
   const [courseTitle, setCourseTitle] = useState("");
   const [courseDescription, setCourseDescription] = useState("");
   const [published, setPublished] = useState(false);
+  const [thumbnailUrl, setThumbnailUrl] = useState("");
+  const [promoVideoUrl, setPromoVideoUrl] = useState("");
+  const [level, setLevel] = useState<CourseDoc["level"]>("beginner");
+  const [durationHours, setDurationHours] = useState<number | "">("");
+  const [learnersCount, setLearnersCount] = useState<number | "">("");
+  const [likesCount, setLikesCount] = useState<number | "">("");
+  const [certificateEnabled, setCertificateEnabled] = useState(true);
 
   const [modules, setModules] = useState<Array<{ id: string; data: ModuleDoc }>>([]);
   const [resources, setResources] = useState<Array<{ id: string; data: ResourceDoc }>>([]);
@@ -87,6 +118,31 @@ export default function InstructorCourseEditor() {
   const [newResourceDescription, setNewResourceDescription] = useState("");
   const [newResourceUrl, setNewResourceUrl] = useState("");
   const [newResourceContent, setNewResourceContent] = useState("");
+  const [newResourceBlocks, setNewResourceBlocks] = useState<LessonBlock[]>([]);
+
+  const [newLessonModuleId, setNewLessonModuleId] = useState<string | null>(null);
+  const [newLessonTitle, setNewLessonTitle] = useState("");
+  const [newLessonType, setNewLessonType] = useState<LessonDoc["type"]>("lesson");
+  const [newLessonOrder, setNewLessonOrder] = useState<number | "">("");
+  const [newLessonContent, setNewLessonContent] = useState("");
+  const [newLessonBlocks, setNewLessonBlocks] = useState<LessonBlock[]>([]);
+
+  function moveBlock<T>(arr: T[], from: number, to: number) {
+    if (from < 0 || from >= arr.length) return arr;
+    if (to < 0 || to >= arr.length) return arr;
+    const next = [...arr];
+    const [x] = next.splice(from, 1);
+    next.splice(to, 0, x);
+    return next;
+  }
+
+  function defaultBlock(type: LessonBlock["type"]): LessonBlock {
+    if (type === "text") return { type: "text", markdown: "" };
+    if (type === "image") return { type: "image", url: "", caption: "" };
+    if (type === "video") return { type: "video", url: "", title: "" };
+    if (type === "link") return { type: "link", url: "", title: "", description: "" };
+    return { type: "divider" };
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +177,13 @@ export default function InstructorCourseEditor() {
         setCourseTitle(courseData?.title ?? "");
         setCourseDescription(courseData?.description ?? "");
         setPublished(courseData?.published === true);
+        setThumbnailUrl(courseData?.thumbnailUrl ?? "");
+        setPromoVideoUrl(courseData?.promoVideoUrl ?? "");
+        setLevel(courseData?.level ?? "beginner");
+        setDurationHours(typeof courseData?.durationHours === "number" ? courseData!.durationHours! : "");
+        setLearnersCount(typeof courseData?.learnersCount === "number" ? courseData!.learnersCount! : "");
+        setLikesCount(typeof courseData?.likesCount === "number" ? courseData!.likesCount! : "");
+        setCertificateEnabled(courseData?.certificateEnabled !== false);
         setModules(modulesSnap.docs.map((d) => ({ id: d.id, data: d.data() as ModuleDoc })));
         setResources(resourcesSnap.docs.map((d) => ({ id: d.id, data: d.data() as ResourceDoc })));
       } catch (e) {
@@ -147,6 +210,13 @@ export default function InstructorCourseEditor() {
       title: courseTitle.trim(),
       description: courseDescription.trim(),
       published,
+      thumbnailUrl: thumbnailUrl.trim(),
+      promoVideoUrl: promoVideoUrl.trim(),
+      level: level ?? null,
+      durationHours: typeof durationHours === "number" ? durationHours : null,
+      learnersCount: typeof learnersCount === "number" ? learnersCount : null,
+      likesCount: typeof likesCount === "number" ? likesCount : null,
+      certificateEnabled,
       updatedAt: serverTimestamp(),
     });
     setCourse((prev) => ({
@@ -154,6 +224,13 @@ export default function InstructorCourseEditor() {
       title: courseTitle.trim(),
       description: courseDescription.trim(),
       published,
+      thumbnailUrl: thumbnailUrl.trim(),
+      promoVideoUrl: promoVideoUrl.trim(),
+      level: level ?? null,
+      durationHours: typeof durationHours === "number" ? durationHours : null,
+      learnersCount: typeof learnersCount === "number" ? learnersCount : null,
+      likesCount: typeof likesCount === "number" ? likesCount : null,
+      certificateEnabled,
     }));
   }
 
@@ -201,11 +278,14 @@ export default function InstructorCourseEditor() {
     const title = newResourceTitle.trim();
     if (!title) return;
 
+    const blocks = newResourceBlocks.length > 0 ? newResourceBlocks : null;
+
     const resourcesRef = collection(firestore, "courses", courseId, "resources");
     const created = await addDoc(resourcesRef, {
       title,
       description: newResourceDescription.trim(),
       url: newResourceUrl.trim(),
+      blocks,
       content: newResourceContent.trim(),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -218,6 +298,7 @@ export default function InstructorCourseEditor() {
           title,
           description: newResourceDescription.trim(),
           url: newResourceUrl.trim(),
+          blocks: blocks ?? undefined,
           content: newResourceContent.trim(),
         },
       },
@@ -228,6 +309,34 @@ export default function InstructorCourseEditor() {
     setNewResourceDescription("");
     setNewResourceUrl("");
     setNewResourceContent("");
+    setNewResourceBlocks([]);
+  }
+
+  async function addLesson() {
+    if (!courseId) return;
+    if (!newLessonModuleId) return;
+    const title = newLessonTitle.trim();
+    if (!title) return;
+
+    const blocks = newLessonBlocks.length > 0 ? newLessonBlocks : null;
+    const order = typeof newLessonOrder === "number" ? newLessonOrder : 1;
+
+    await addDoc(collection(firestore, "courses", courseId, "modules", newLessonModuleId, "lessons"), {
+      title,
+      type: newLessonType ?? "lesson",
+      order,
+      blocks,
+      content: newLessonContent.trim(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    setNewLessonTitle("");
+    setNewLessonType("lesson");
+    setNewLessonOrder("");
+    setNewLessonContent("");
+    setNewLessonBlocks([]);
+    setNewLessonModuleId(null);
   }
 
   async function deleteResource(resourceId: string) {
@@ -335,6 +444,95 @@ export default function InstructorCourseEditor() {
                     onChange={(e) => setCourseDescription(e.target.value)}
                     placeholder="What will students learn?"
                   />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm text-muted-foreground">Course card image URL</div>
+                  <Input
+                    value={thumbnailUrl}
+                    onChange={(e) => setThumbnailUrl(e.target.value)}
+                    placeholder="https://..."
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm text-muted-foreground">Promo video URL (YouTube/Vimeo/MP4)</div>
+                  <Input
+                    value={promoVideoUrl}
+                    onChange={(e) => setPromoVideoUrl(e.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=..."
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <div className="text-sm text-muted-foreground">Level</div>
+                    <select
+                      className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={level ?? "beginner"}
+                      onChange={(e) => setLevel(e.target.value as CourseDoc["level"])}
+                    >
+                      <option value="beginner">Beginner</option>
+                      <option value="intermediate">Intermediate</option>
+                      <option value="advanced">Advanced</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-sm text-muted-foreground">Duration (hours)</div>
+                    <Input
+                      inputMode="numeric"
+                      value={durationHours}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (!v) return setDurationHours("");
+                        const n = Number(v);
+                        if (!Number.isFinite(n)) return;
+                        setDurationHours(n);
+                      }}
+                      placeholder="3"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-sm text-muted-foreground">Learners</div>
+                    <Input
+                      inputMode="numeric"
+                      value={learnersCount}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (!v) return setLearnersCount("");
+                        const n = Number(v);
+                        if (!Number.isFinite(n)) return;
+                        setLearnersCount(n);
+                      }}
+                      placeholder="11748"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-sm text-muted-foreground">Likes</div>
+                    <Input
+                      inputMode="numeric"
+                      value={likesCount}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (!v) return setLikesCount("");
+                        const n = Number(v);
+                        if (!Number.isFinite(n)) return;
+                        setLikesCount(n);
+                      }}
+                      placeholder="71"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">Certificate</div>
+                    <div className="text-xs text-muted-foreground">Show certificate badge on the course card.</div>
+                  </div>
+                  <Switch checked={certificateEnabled} onCheckedChange={setCertificateEnabled} />
                 </div>
 
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
@@ -456,11 +654,273 @@ export default function InstructorCourseEditor() {
                             <Button asChild size="sm" variant="outline">
                               <Link to={`/instructors/courses/${courseId}/modules/${m.id}/questions`}>Questions</Link>
                             </Button>
+                            <Dialog>
+                              <DialogTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setNewLessonModuleId(m.id);
+                                  }}
+                                >
+                                  Add lesson
+                                </Button>
+                              </DialogTrigger>
+                              <DialogContent>
+                                <DialogHeader>
+                                  <DialogTitle>New lesson</DialogTitle>
+                                </DialogHeader>
+
+                                <div className="space-y-4">
+                                  <div className="space-y-2">
+                                    <div className="text-sm text-muted-foreground">Title</div>
+                                    <Input value={newLessonTitle} onChange={(e) => setNewLessonTitle(e.target.value)} placeholder="Lesson title" />
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div className="space-y-2">
+                                      <div className="text-sm text-muted-foreground">Type</div>
+                                      <select
+                                        className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                                        value={newLessonType ?? "lesson"}
+                                        onChange={(e) => setNewLessonType(e.target.value as LessonDoc["type"])}
+                                      >
+                                        <option value="lesson">Lesson</option>
+                                        <option value="exercise">Exercise</option>
+                                      </select>
+                                    </div>
+                                    <div className="space-y-2">
+                                      <div className="text-sm text-muted-foreground">Order</div>
+                                      <Input
+                                        inputMode="numeric"
+                                        value={newLessonOrder}
+                                        onChange={(e) => {
+                                          const v = e.target.value;
+                                          if (!v) return setNewLessonOrder("");
+                                          const n = Number(v);
+                                          if (!Number.isFinite(n)) return;
+                                          setNewLessonOrder(n);
+                                        }}
+                                        placeholder="1"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <div className="text-sm text-muted-foreground">Blocks</div>
+                                    <div className="rounded-lg border border-border p-3 space-y-3">
+                                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                                        <div className="text-xs text-muted-foreground">Add and reorder content blocks (text, image, video, link).</div>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setNewLessonBlocks((prev) => [...prev, defaultBlock("video")])}
+                                          >
+                                            Add video
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setNewLessonBlocks((prev) => [...prev, defaultBlock("image")])}
+                                          >
+                                            Add image
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setNewLessonBlocks((prev) => [...prev, defaultBlock("text")])}
+                                          >
+                                            Add text
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setNewLessonBlocks((prev) => [...prev, defaultBlock("link")])}
+                                          >
+                                            Add link
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setNewLessonBlocks((prev) => [...prev, defaultBlock("divider")])}
+                                          >
+                                            Divider
+                                          </Button>
+                                        </div>
+                                      </div>
+
+                                      {newLessonBlocks.length === 0 ? (
+                                        <div className="text-xs text-muted-foreground">No blocks yet.</div>
+                                      ) : (
+                                        <div className="space-y-3">
+                                          {newLessonBlocks.map((b, idx) => (
+                                            <div key={idx} className="rounded-md border border-border p-3 space-y-2">
+                                              <div className="flex items-center justify-between gap-3">
+                                                <div className="text-xs font-medium text-foreground">{b.type.toUpperCase()}</div>
+                                                <div className="flex items-center gap-2">
+                                                  <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => setNewLessonBlocks((prev) => moveBlock(prev, idx, idx - 1))}
+                                                    disabled={idx === 0}
+                                                  >
+                                                    Up
+                                                  </Button>
+                                                  <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => setNewLessonBlocks((prev) => moveBlock(prev, idx, idx + 1))}
+                                                    disabled={idx === newLessonBlocks.length - 1}
+                                                  >
+                                                    Down
+                                                  </Button>
+                                                  <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="destructive"
+                                                    onClick={() => setNewLessonBlocks((prev) => prev.filter((_, i) => i !== idx))}
+                                                  >
+                                                    Remove
+                                                  </Button>
+                                                </div>
+                                              </div>
+
+                                              {b.type === "text" ? (
+                                                <Textarea
+                                                  value={b.markdown}
+                                                  onChange={(e) =>
+                                                    setNewLessonBlocks((prev) =>
+                                                      prev.map((x, i) => (i === idx ? { ...x, markdown: e.target.value } : x)),
+                                                    )
+                                                  }
+                                                  placeholder="Write lesson text…"
+                                                  className="min-h-[120px]"
+                                                />
+                                              ) : null}
+
+                                              {b.type === "image" ? (
+                                                <div className="space-y-2">
+                                                  <Input
+                                                    value={b.url}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, url: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Image URL"
+                                                  />
+                                                  <Input
+                                                    value={b.caption ?? ""}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, caption: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Caption (optional)"
+                                                  />
+                                                </div>
+                                              ) : null}
+
+                                              {b.type === "video" ? (
+                                                <div className="space-y-2">
+                                                  <Input
+                                                    value={b.url}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, url: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Video URL (YouTube / MP4)"
+                                                  />
+                                                  <Input
+                                                    value={b.title ?? ""}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, title: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Title (optional)"
+                                                  />
+                                                </div>
+                                              ) : null}
+
+                                              {b.type === "link" ? (
+                                                <div className="space-y-2">
+                                                  <Input
+                                                    value={b.url}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, url: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Link URL"
+                                                  />
+                                                  <Input
+                                                    value={b.title ?? ""}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, title: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Title (optional)"
+                                                  />
+                                                  <Input
+                                                    value={b.description ?? ""}
+                                                    onChange={(e) =>
+                                                      setNewLessonBlocks((prev) =>
+                                                        prev.map((x, i) => (i === idx ? { ...x, description: e.target.value } : x)),
+                                                      )
+                                                    }
+                                                    placeholder="Description (optional)"
+                                                  />
+                                                </div>
+                                              ) : null}
+
+                                              {b.type === "divider" ? (
+                                                <div className="text-xs text-muted-foreground">Divider</div>
+                                              ) : null}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <div className="text-sm text-muted-foreground">Fallback content (text)</div>
+                                    <Textarea
+                                      value={newLessonContent}
+                                      onChange={(e) => setNewLessonContent(e.target.value)}
+                                      placeholder="Optional plain text fallback"
+                                      className="min-h-[120px]"
+                                    />
+                                  </div>
+                                </div>
+
+                                <DialogFooter>
+                                  <Button
+                                    onClick={() => void addLesson()}
+                                    disabled={!newLessonTitle.trim() || !newLessonModuleId}
+                                  >
+                                    Create
+                                  </Button>
+                                </DialogFooter>
+                              </DialogContent>
+                            </Dialog>
+
                             <Button
-                              variant="destructive"
                               size="sm"
+                              variant="destructive"
                               onClick={() => {
-                                const ok = window.confirm("Delete this module?");
+                                const ok = window.confirm("Delete this module? Lessons inside will also be removed by Firestore delete rules.");
                                 if (!ok) return;
                                 void deleteModule(m.id);
                               }}

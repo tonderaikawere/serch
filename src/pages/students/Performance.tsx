@@ -18,16 +18,16 @@ export default function Performance() {
 
   return (
     <DashboardLayout>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold text-foreground">Performance Review</h1>
             <p className="text-muted-foreground mt-1">
               Track performance metrics for your projects and learning
             </p>
           </div>
-          <Button disabled>
+          <Button disabled className="w-full sm:w-auto">
             <Download className="w-4 h-4 mr-2" />
             Export Report
           </Button>
@@ -75,11 +75,13 @@ export default function Performance() {
         </div>
 
         <Tabs defaultValue="analytics" className="space-y-6">
-          <TabsList>
-            <TabsTrigger value="analytics">Analytics</TabsTrigger>
-            <TabsTrigger value="timeline">Action Timeline</TabsTrigger>
-            <TabsTrigger value="reflection">Reflection</TabsTrigger>
-          </TabsList>
+          <div className="overflow-x-auto">
+            <TabsList className="w-max">
+              <TabsTrigger value="analytics">Analytics</TabsTrigger>
+              <TabsTrigger value="timeline">Action Timeline</TabsTrigger>
+              <TabsTrigger value="reflection">Reflection</TabsTrigger>
+            </TabsList>
+          </div>
 
           <TabsContent value="analytics" className="space-y-6">
             <Card>

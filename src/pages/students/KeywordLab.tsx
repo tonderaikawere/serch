@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,8 @@ export default function KeywordLab() {
   const [keywords, setKeywords] = useState<Keyword[]>([]);
   const [selectedKeyword, setSelectedKeyword] = useState<Keyword | null>(null);
 
+  const [assignedPage, setAssignedPage] = useState("");
+
   const [newTerm, setNewTerm] = useState("");
   const [newIntent, setNewIntent] = useState<Keyword["intent"]>("informational");
 
@@ -49,6 +51,10 @@ export default function KeywordLab() {
 
   const uid = profile?.uid;
 
+  const [score, setScore] = useState(0);
+  const [completed, setCompleted] = useState(false);
+  const lastCompletionRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
     if (!uid) return;
@@ -56,8 +62,14 @@ export default function KeywordLab() {
       try {
         const ref = doc(firestore, "students", uid, "workspace", "keywords");
         const snap = await getDoc(ref);
-        const data = snap.exists() ? (snap.data() as { keywords?: Keyword[] }) : null;
-        if (!cancelled && Array.isArray(data?.keywords)) setKeywords(data!.keywords);
+        const data = snap.exists() ? (snap.data() as { keywords?: Keyword[]; score?: number; completed?: boolean }) : null;
+        if (cancelled) return;
+        if (Array.isArray(data?.keywords)) setKeywords(data!.keywords);
+        if (typeof data?.score === "number") setScore(data.score);
+        if (typeof data?.completed === "boolean") {
+          setCompleted(data.completed);
+          lastCompletionRef.current = data.completed;
+        }
       } catch {
         // ignore
       }
@@ -66,6 +78,71 @@ export default function KeywordLab() {
       cancelled = true;
     };
   }, [uid]);
+
+  const computed = useMemo(() => {
+    const counts = {
+      informational: 0,
+      transactional: 0,
+      navigational: 0,
+    } as Record<Keyword["intent"], number>;
+
+    let assignedCount = 0;
+    for (const k of keywords) {
+      counts[k.intent] += 1;
+      if (k.assigned && k.assigned.trim()) assignedCount += 1;
+    }
+
+    const hasCoverage = counts.informational >= 2 && counts.transactional >= 2 && counts.navigational >= 1;
+    const hasAssignments = assignedCount >= 3;
+
+    const checks = [
+      { label: "At least 2 informational keywords", passed: counts.informational >= 2 },
+      { label: "At least 2 transactional keywords", passed: counts.transactional >= 2 },
+      { label: "At least 1 navigational keyword", passed: counts.navigational >= 1 },
+      { label: "Assign at least 3 keywords to pages", passed: hasAssignments },
+    ];
+    const passed = checks.filter((c) => c.passed).length;
+    const score = Math.round((passed / checks.length) * 100);
+    const completed = hasCoverage && hasAssignments;
+    return { checks, score, completed, counts, assignedCount };
+  }, [keywords]);
+
+  useEffect(() => {
+    if (!uid) return;
+    setScore(computed.score);
+    setCompleted(computed.completed);
+
+    const handle = window.setTimeout(() => {
+      void setDoc(
+        doc(firestore, "students", uid, "workspace", "keywords"),
+        {
+          keywords,
+          score: computed.score,
+          completed: computed.completed,
+          completedAt: computed.completed ? serverTimestamp() : null,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      ).catch(() => {});
+
+      if (computed.completed && !lastCompletionRef.current) {
+        lastCompletionRef.current = true;
+        void addDoc(collection(firestore, "students", uid, "events"), {
+          type: "keyword_lab_completed",
+          label: "Keyword Lab completed",
+          meta: { score: computed.score },
+          createdAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+      if (!computed.completed) {
+        lastCompletionRef.current = false;
+      }
+    }, 400);
+
+    return () => {
+      window.clearTimeout(handle);
+    };
+  }, [computed.completed, computed.score, keywords, uid]);
 
   const addKeyword = () => {
     const term = newTerm.trim();
@@ -98,9 +175,56 @@ export default function KeywordLab() {
     setSelectedKeyword(next);
   };
 
+  useEffect(() => {
+    setAssignedPage(selectedKeyword?.assigned ?? "");
+  }, [selectedKeyword?.assigned, selectedKeyword?.term]);
+
+  function normalizePagePath(v: string) {
+    const s = v.trim();
+    if (!s) return "";
+    if (s.startsWith("http://") || s.startsWith("https://")) {
+      try {
+        const u = new URL(s);
+        return u.pathname || "/";
+      } catch {
+        return s;
+      }
+    }
+    return s.startsWith("/") ? s : `/${s}`;
+  }
+
+  function assignSelectedKeyword(nextPath: string) {
+    const uid = profile?.uid;
+    if (!uid || !selectedKeyword) return;
+    const path = normalizePagePath(nextPath);
+    if (!path) return;
+
+    setKeywords((prev) => {
+      const idx = prev.findIndex((k) => k.term === selectedKeyword.term && k.intent === selectedKeyword.intent);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], assigned: path };
+      return next;
+    });
+
+    setSelectedKeyword((prev) => (prev ? { ...prev, assigned: path } : prev));
+    setAssignedPage(path);
+
+    void addDoc(collection(firestore, "students", uid, "events"), {
+      type: "keyword_assigned",
+      label: `Keyword assigned: ${selectedKeyword.term}`,
+      meta: {
+        term: selectedKeyword.term,
+        intent: selectedKeyword.intent,
+        assigned: path,
+      },
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+
   return (
     <DashboardLayout>
-      <div className="p-8">
+      <div className="p-4 sm:p-8 overflow-x-hidden">
         {/* Header */}
         <header className="mb-8 animate-slide-up">
           <h1 className="text-3xl font-display font-bold text-foreground mb-2">
@@ -113,9 +237,9 @@ export default function KeywordLab() {
 
         <div className="grid lg:grid-cols-3 gap-6">
           {/* Keyword Research */}
-          <Card className="lg:col-span-2 p-6 animate-slide-up">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="relative flex-1">
+          <Card className="lg:col-span-2 p-6 animate-slide-up min-w-0 overflow-x-hidden">
+            <div className="flex flex-col gap-4 mb-6 sm:flex-row sm:items-center">
+              <div className="relative w-full sm:flex-1 min-w-0">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                 <Input
                   placeholder="Search keywords or enter new term..."
@@ -124,18 +248,19 @@ export default function KeywordLab() {
                   className="pl-10"
                 />
               </div>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end sm:flex-wrap w-full sm:w-auto min-w-0">
                 <Input
                   placeholder="Add keyword…"
                   value={newTerm}
                   onChange={(e) => setNewTerm(e.target.value)}
-                  className="w-56"
+                  className="w-full sm:w-56"
                 />
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Button
                     type="button"
                     variant={newIntent === "informational" ? "default" : "outline"}
                     size="sm"
+                    className="w-16 justify-center"
                     onClick={() => setNewIntent("informational")}
                   >
                     Info
@@ -144,6 +269,7 @@ export default function KeywordLab() {
                     type="button"
                     variant={newIntent === "transactional" ? "default" : "outline"}
                     size="sm"
+                    className="w-16 justify-center"
                     onClick={() => setNewIntent("transactional")}
                   >
                     Buy
@@ -152,12 +278,17 @@ export default function KeywordLab() {
                     type="button"
                     variant={newIntent === "navigational" ? "default" : "outline"}
                     size="sm"
+                    className="w-16 justify-center"
                     onClick={() => setNewIntent("navigational")}
                   >
                     Nav
                   </Button>
                 </div>
-                <Button onClick={addKeyword} disabled={!newTerm.trim()} className="gradient-seo text-primary-foreground">
+                <Button
+                  onClick={addKeyword}
+                  disabled={!newTerm.trim()}
+                  className="gradient-seo text-primary-foreground w-full sm:w-auto"
+                >
                   <Plus className="w-4 h-4 mr-2" />
                   Add
                 </Button>
@@ -166,16 +297,16 @@ export default function KeywordLab() {
 
             {/* Keyword Table */}
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-fixed">
                 <thead>
                   <tr className="border-b border-border">
-                    <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                    <th className="text-left p-3 text-sm font-medium text-muted-foreground w-1/2">
                       Keyword
                     </th>
-                    <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                    <th className="text-left p-3 text-sm font-medium text-muted-foreground w-1/4">
                       Intent
                     </th>
-                    <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                    <th className="text-left p-3 text-sm font-medium text-muted-foreground w-1/4">
                       Action
                     </th>
                   </tr>
@@ -199,8 +330,8 @@ export default function KeywordLab() {
                         )}
                         onClick={() => setSelectedKeyword(keyword)}
                       >
-                        <td className="p-3">
-                          <span className="font-medium text-foreground">{keyword.term}</span>
+                        <td className="p-3 min-w-0">
+                          <span className="font-medium text-foreground truncate block">{keyword.term}</span>
                         </td>
                         <td className="p-3">
                           <Badge variant="outline" className={intentColors[keyword.intent]}>
@@ -209,7 +340,14 @@ export default function KeywordLab() {
                           </Badge>
                         </td>
                         <td className="p-3">
-                          <Button variant="outline" size="sm">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedKeyword(keyword);
+                            }}
+                          >
                             <Plus className="w-3 h-3 mr-1" />
                             Assign
                           </Button>
@@ -269,9 +407,26 @@ export default function KeywordLab() {
                       ))}
                     </div>
                   </div>
-                  <Button className="w-full gradient-accent text-accent-foreground">
-                    Assign to Page
-                  </Button>
+                  <div className="space-y-2">
+                    <p className="text-sm text-muted-foreground">Assign to page</p>
+                    <Input
+                      placeholder="/pricing"
+                      value={assignedPage}
+                      onChange={(e) => setAssignedPage(e.target.value)}
+                    />
+                    <Button
+                      className="w-full gradient-accent text-accent-foreground"
+                      onClick={() => assignSelectedKeyword(assignedPage)}
+                      disabled={!assignedPage.trim()}
+                    >
+                      Save assignment
+                    </Button>
+                    {selectedKeyword.assigned && (
+                      <p className="text-xs text-muted-foreground">
+                        Assigned to: <span className="text-foreground">{selectedKeyword.assigned}</span>
+                      </p>
+                    )}
+                  </div>
                 </div>
               </Card>
             )}

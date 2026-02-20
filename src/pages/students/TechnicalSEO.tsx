@@ -17,7 +17,10 @@ import {
   Clock,
   RefreshCw
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { firestore } from "@/lib/firebase";
+import { addDoc, collection, doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 
 type PageStatus = {
   id: string;
@@ -26,17 +29,130 @@ type PageStatus = {
   crawled: boolean;
   indexed: boolean;
   speed: number;
+  reason?: string;
 };
 
 type BrokenLinkRow = { page: string; link: string; status: number };
 
 export default function TechnicalSEO() {
-  const [crawlBudget, setCrawlBudget] = useState([0]);
-  const [pageSpeed, setPageSpeed] = useState([0]);
-  const [mobileOptimized, setMobileOptimized] = useState(false);
-  const [httpsEnabled, setHttpsEnabled] = useState(false);
+  const { profile } = useAuth();
+  const uid = profile?.uid ?? null;
+
+  const [crawlBudget, setCrawlBudget] = useState([70]);
+  const [pageSpeed, setPageSpeed] = useState([75]);
+  const [mobileOptimized, setMobileOptimized] = useState(true);
+  const [httpsEnabled, setHttpsEnabled] = useState(true);
   const [pages, setPages] = useState<PageStatus[]>([]);
   const [brokenLinks, setBrokenLinks] = useState<BrokenLinkRow[]>([]);
+  const [lastRunAt, setLastRunAt] = useState<number | null>(null);
+  const [score, setScore] = useState(0);
+  const [completed, setCompleted] = useState(false);
+  const lastCompletionRef = useRef(false);
+
+  async function persistWorkspace(next: {
+    crawlBudget: number;
+    pageSpeed: number;
+    mobileOptimized: boolean;
+    httpsEnabled: boolean;
+    pages: PageStatus[];
+    brokenLinks: BrokenLinkRow[];
+    lastRunAt: number | null;
+    score: number;
+    completed: boolean;
+  }) {
+    if (!uid) return;
+    await setDoc(
+      doc(firestore, "students", uid, "workspace", "technical"),
+      {
+        ...next,
+        updatedAt: serverTimestamp(),
+        completedAt: next.completed ? serverTimestamp() : null,
+      },
+      { merge: true },
+    ).catch(() => {});
+  }
+
+  async function logEvent(type: string, label: string, meta?: Record<string, unknown>) {
+    if (!uid) return;
+    await addDoc(collection(firestore, "students", uid, "events"), {
+      type,
+      label,
+      meta: meta ?? {},
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!uid) return;
+    let cancelled = false;
+    void (async () => {
+      const ref = doc(firestore, "students", uid, "workspace", "technical");
+      const snap = await getDoc(ref).catch(() => null);
+      if (cancelled || !snap || !snap.exists()) return;
+      const data = snap.data() as Partial<{
+        crawlBudget: number;
+        pageSpeed: number;
+        mobileOptimized: boolean;
+        httpsEnabled: boolean;
+        pages: PageStatus[];
+        brokenLinks: BrokenLinkRow[];
+        lastRunAt: number | null;
+        score: number;
+        completed: boolean;
+      }>;
+      if (typeof data.crawlBudget === "number") setCrawlBudget([Math.max(0, Math.min(100, data.crawlBudget))]);
+      if (typeof data.pageSpeed === "number") setPageSpeed([Math.max(0, Math.min(100, data.pageSpeed))]);
+      if (typeof data.mobileOptimized === "boolean") setMobileOptimized(data.mobileOptimized);
+      if (typeof data.httpsEnabled === "boolean") setHttpsEnabled(data.httpsEnabled);
+      if (Array.isArray(data.pages)) setPages(data.pages);
+      if (Array.isArray(data.brokenLinks)) setBrokenLinks(data.brokenLinks);
+      if (typeof data.lastRunAt === "number" || data.lastRunAt === null) setLastRunAt(data.lastRunAt ?? null);
+      if (typeof data.score === "number") setScore(data.score);
+      if (typeof data.completed === "boolean") {
+        setCompleted(data.completed);
+        lastCompletionRef.current = data.completed;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uid]);
+
+  const computedScore = useMemo(() => {
+    let s = 0;
+    s += Math.round(crawlBudget[0] * 0.2);
+    s += Math.round(pageSpeed[0] * 0.5);
+    s += mobileOptimized ? 15 : 0;
+    s += httpsEnabled ? 15 : 0;
+    s -= Math.min(30, brokenLinks.length * 10);
+    return Math.max(0, Math.min(100, s));
+  }, [brokenLinks.length, crawlBudget, httpsEnabled, mobileOptimized, pageSpeed]);
+
+  useEffect(() => {
+    setScore(computedScore);
+    const nextCompleted = computedScore >= 80;
+    setCompleted(nextCompleted);
+    void persistWorkspace({
+      crawlBudget: crawlBudget[0],
+      pageSpeed: pageSpeed[0],
+      mobileOptimized,
+      httpsEnabled,
+      pages,
+      brokenLinks,
+      lastRunAt,
+      score: computedScore,
+      completed: nextCompleted,
+    });
+
+    if (nextCompleted && !lastCompletionRef.current) {
+      lastCompletionRef.current = true;
+      void logEvent("technical_completed", "Technical SEO completed", { score: computedScore });
+    }
+    if (!nextCompleted) {
+      lastCompletionRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computedScore, crawlBudget, pageSpeed, mobileOptimized, httpsEnabled, pages, brokenLinks, lastRunAt, uid]);
 
   const getSpeedColor = (speed: number) => {
     if (speed >= 80) return "text-success";
@@ -50,18 +166,105 @@ export default function TechnicalSEO() {
     return "bg-destructive";
   };
 
+  const runChecks = () => {
+    const crawlOk = crawlBudget[0] >= 50;
+    const blogCrawled = crawlBudget[0] >= 40;
+    const aboutCrawled = crawlBudget[0] >= 30;
+    const pricingCrawled = crawlBudget[0] >= 50;
+
+    const blogIndexed = crawlBudget[0] >= 50;
+    const aboutIndexed = crawlBudget[0] >= 60;
+    const pricingIndexed = crawlBudget[0] >= 70;
+
+    const basePages: PageStatus[] = [
+      { id: "home", name: "Home", url: "/", crawled: true, indexed: true, speed: pageSpeed[0] },
+      {
+        id: "blog",
+        name: "Blog",
+        url: "/blog",
+        crawled: blogCrawled,
+        indexed: blogIndexed,
+        speed: Math.max(0, pageSpeed[0] - 5),
+        reason: !blogCrawled
+          ? "Low crawl budget: bots may not reach deep content."
+          : !blogIndexed
+            ? "Crawled but not indexed yet: budget/quality signals are too weak."
+            : undefined,
+      },
+      {
+        id: "about",
+        name: "About",
+        url: "/about",
+        crawled: aboutCrawled,
+        indexed: aboutIndexed,
+        speed: Math.max(0, pageSpeed[0] - 10),
+        reason: !aboutCrawled
+          ? "Low crawl budget: important pages may be skipped."
+          : !aboutIndexed
+            ? "Crawled but not indexed yet: strengthen internal links and overall quality."
+            : undefined,
+      },
+      {
+        id: "pricing",
+        name: "Pricing",
+        url: "/pricing",
+        crawled: pricingCrawled,
+        indexed: pricingIndexed,
+        speed: Math.max(0, pageSpeed[0] - 8),
+        reason: !pricingCrawled
+          ? "Low crawl budget: commercial pages may not be revisited often."
+          : !pricingIndexed
+            ? "Crawled but not indexed yet: improve performance and ensure the page is mobile-ready."
+            : undefined,
+      },
+    ];
+
+    const nextBroken: BrokenLinkRow[] = [];
+    if (!httpsEnabled) {
+      nextBroken.push({ page: "Home", link: "http://your-site.test/checkout", status: 301 });
+    }
+    if (pageSpeed[0] < 50) {
+      nextBroken.push({ page: "Blog", link: "/images/hero.jpg", status: 404 });
+    }
+    if (!mobileOptimized) {
+      nextBroken.push({ page: "Pricing", link: "/css/mobile.css", status: 404 });
+    }
+
+    let nextScore = 0;
+    nextScore += Math.round(crawlBudget[0] * 0.2);
+    nextScore += Math.round(pageSpeed[0] * 0.5);
+    nextScore += mobileOptimized ? 15 : 0;
+    nextScore += httpsEnabled ? 15 : 0;
+    nextScore -= Math.min(30, nextBroken.length * 10);
+    nextScore = Math.max(0, Math.min(100, nextScore));
+
+    setPages(basePages);
+    setBrokenLinks(nextBroken);
+    const ts = Date.now();
+    setLastRunAt(ts);
+    void logEvent("technical_check_run", "Technical SEO checks run", {
+      score: nextScore,
+      brokenLinks: nextBroken.length,
+      crawlBudget: crawlBudget[0],
+      pageSpeed: pageSpeed[0],
+      mobileOptimized,
+      httpsEnabled,
+      crawlOk,
+    });
+  };
+
   return (
     <DashboardLayout>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-foreground">Technical SEO</h1>
+            <h1 className="text-3xl font-bold text-foreground">Technical SEO Lab</h1>
             <p className="text-muted-foreground mt-1">
-              Track technical checks and document issues as you work.
+              Optimize technical factors that impact search engine crawling and ranking
             </p>
           </div>
-          <Button disabled>
+          <Button onClick={runChecks} className="gradient-accent text-accent-foreground w-full sm:w-auto">
             <RefreshCw className="w-4 h-4 mr-2" />
             Run Checks
           </Button>
@@ -219,38 +422,38 @@ export default function TechnicalSEO() {
               ) : (
                 <div className="space-y-3">
                   {pages.map((page) => (
-                    <div key={page.id} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full ${page.indexed ? "bg-success" : page.crawled ? "bg-warning" : "bg-destructive"}`} />
-                      <div>
-                        <p className="font-medium text-sm text-foreground">{page.name}</p>
-                        <p className="text-xs text-muted-foreground">{page.url}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-1">
-                        {page.crawled ? (
-                          <CheckCircle2 className="w-4 h-4 text-success" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-destructive" />
-                        )}
-                        <span className="text-xs text-muted-foreground">Crawled</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        {page.indexed ? (
-                          <CheckCircle2 className="w-4 h-4 text-success" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-destructive" />
-                        )}
-                        <span className="text-xs text-muted-foreground">Indexed</span>
-                      </div>
-                      <div className="w-16">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className={`text-xs font-medium ${getSpeedColor(page.speed)}`}>{page.speed}</span>
+                    <div key={page.id} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between p-3 bg-muted/30 rounded-lg">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`w-2 h-2 rounded-full ${page.indexed ? "bg-success" : page.crawled ? "bg-warning" : "bg-destructive"}`} />
+                        <div className="min-w-0">
+                          <p className="font-medium text-sm text-foreground">{page.name}</p>
+                          <p className="text-xs text-muted-foreground truncate">{page.url}</p>
                         </div>
-                        <Progress value={page.speed} className={`h-1.5 ${getSpeedBg(page.speed)}`} />
                       </div>
-                    </div>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-1">
+                          {page.crawled ? (
+                            <CheckCircle2 className="w-4 h-4 text-success" />
+                          ) : (
+                            <XCircle className="w-4 h-4 text-destructive" />
+                          )}
+                          <span className="text-xs text-muted-foreground">Crawled</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {page.indexed ? (
+                            <CheckCircle2 className="w-4 h-4 text-success" />
+                          ) : (
+                            <XCircle className="w-4 h-4 text-destructive" />
+                          )}
+                          <span className="text-xs text-muted-foreground">Indexed</span>
+                        </div>
+                        <div className="w-24 sm:w-16">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`text-xs font-medium ${getSpeedColor(page.speed)}`}>{page.speed}</span>
+                          </div>
+                          <Progress value={page.speed} className={`h-1.5 ${getSpeedBg(page.speed)}`} />
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -293,14 +496,14 @@ export default function TechnicalSEO() {
               {brokenLinks.length > 0 ? (
                 <div className="space-y-3">
                   {brokenLinks.map((link, index) => (
-                    <div key={index} className="flex items-center justify-between p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
-                      <div>
-                        <p className="font-medium text-sm text-foreground">
-                          {link.page}
-                        </p>
-                        <p className="text-xs text-muted-foreground">{link.link}</p>
+                    <div key={index} className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+                      <div className="min-w-0">
+                        <p className="font-medium text-sm text-foreground">{link.page}</p>
+                        <p className="text-xs text-muted-foreground truncate">{link.link}</p>
                       </div>
-                      <Badge variant="destructive">{link.status}</Badge>
+                      <div className="flex items-center justify-end">
+                        <Badge variant="destructive">{link.status}</Badge>
+                      </div>
                     </div>
                   ))}
                   <Button variant="outline" className="w-full mt-4" disabled>

@@ -19,6 +19,13 @@ type CourseRow = {
   modulesCount?: number;
   resourcesCount?: number;
   order?: number;
+  thumbnailUrl?: string;
+  promoVideoUrl?: string;
+  level?: "beginner" | "intermediate" | "advanced";
+  durationHours?: number;
+  learnersCount?: number;
+  likesCount?: number;
+  certificateEnabled?: boolean;
 };
 
 type CourseProgressDoc = {
@@ -176,14 +183,48 @@ export default function StudentCourses() {
                     }
                   >
                     <CardContent className="p-4 space-y-3">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 space-y-1">
-                          <div className="text-lg font-semibold text-foreground truncate">{c.title ?? "Untitled course"}</div>
-                          {c.description && <div className="text-sm text-muted-foreground">{c.description}</div>}
+                      <div className="flex items-start gap-4">
+                        {c.thumbnailUrl ? (
+                          <div className="w-24 sm:w-28 shrink-0">
+                            <div className="aspect-video w-full overflow-hidden rounded-md border border-border bg-muted/30">
+                              <img
+                                src={c.thumbnailUrl}
+                                alt={c.title ?? "Course"}
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="flex-1 min-w-0 space-y-1">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              {c.level ? (
+                                <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+                                  {c.level} level
+                                </div>
+                              ) : null}
+                              <div className="text-lg font-semibold text-foreground truncate">{c.title ?? "Untitled course"}</div>
+                              {c.description && <div className="text-sm text-muted-foreground">{c.description}</div>}
+                            </div>
+                            <div className="shrink-0 flex items-center gap-2">
+                              {c.certificateEnabled ? <Badge variant="outline">Certificate</Badge> : null}
+                              {c.promoVideoUrl ? <Badge variant="outline">Video</Badge> : null}
+                              <Badge variant={isCourseUnlocked(c.id) ? "secondary" : "outline"}>
+                                {isCourseUnlocked(c.id) ? "Unlocked" : "Locked"}
+                              </Badge>
+                            </div>
+                          </div>
+
+                          {(typeof c.durationHours === "number" || typeof c.learnersCount === "number" || typeof c.likesCount === "number") && (
+                            <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+                              {typeof c.likesCount === "number" ? <div>{c.likesCount} liked this course</div> : null}
+                              {typeof c.durationHours === "number" ? <div>{c.durationHours} hrs</div> : null}
+                              {typeof c.learnersCount === "number" ? <div>{c.learnersCount.toLocaleString()} learners</div> : null}
+                            </div>
+                          )}
                         </div>
-                        <Badge variant={isCourseUnlocked(c.id) ? "secondary" : "outline"}>
-                          {isCourseUnlocked(c.id) ? "Unlocked" : "Locked"}
-                        </Badge>
                       </div>
 
                       <div className="space-y-2">
@@ -206,9 +247,16 @@ export default function StudentCourses() {
                               : `${completedLessonsByCourse[c.id] ?? 0} lessons completed`}
                           </div>
                           {isCourseUnlocked(c.id) ? (
-                            <Button asChild size="sm">
-                              <Link to={`/students/courses/${c.id}`}>Continue</Link>
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <Button asChild size="sm" variant="outline">
+                                <Link to={`/students/courses/${c.id}`}>More info</Link>
+                              </Button>
+                              <Button asChild size="sm">
+                                <Link to={`/students/courses/${c.id}/player`}>
+                                  {completedLessonsByCourse[c.id] ? "Continue learning" : "Start learning"}
+                                </Link>
+                              </Button>
+                            </div>
                           ) : (
                             <div className="text-xs text-muted-foreground">Finish previous course</div>
                           )}

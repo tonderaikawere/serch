@@ -41,6 +41,19 @@ export default function InstructorCourses() {
 
   const [newTitle, setNewTitle] = useState("");
   const [newDescription, setNewDescription] = useState("");
+  const [newThumbnailUrl, setNewThumbnailUrl] = useState("");
+  const [newPromoVideoUrl, setNewPromoVideoUrl] = useState("");
+  const [newLevel, setNewLevel] = useState<"beginner" | "intermediate" | "advanced">("beginner");
+  const [newDurationHours, setNewDurationHours] = useState<number | "">("");
+  const [newLearnersCount, setNewLearnersCount] = useState<number | "">("");
+  const [newLikesCount, setNewLikesCount] = useState<number | "">("");
+  const [newCertificateEnabled, setNewCertificateEnabled] = useState(true);
+
+  const [newCourseWizardStep, setNewCourseWizardStep] = useState<1 | 2>(1);
+  const [createdCourseId, setCreatedCourseId] = useState<string | null>(null);
+  const [importJson, setImportJson] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const moduleTitlesBySeedKey: Record<string, string[]> = {
     "seo-foundations": [
@@ -264,13 +277,25 @@ export default function InstructorCourses() {
   async function createCourse() {
     const title = newTitle.trim();
     if (!title) return;
+
     const created = await addDoc(collection(firestore, "courses"), {
       title,
       description: newDescription.trim(),
+      thumbnailUrl: newThumbnailUrl.trim(),
+      promoVideoUrl: newPromoVideoUrl.trim(),
+      level: newLevel,
+      durationHours: typeof newDurationHours === "number" ? newDurationHours : null,
+      learnersCount: typeof newLearnersCount === "number" ? newLearnersCount : null,
+      likesCount: typeof newLikesCount === "number" ? newLikesCount : null,
+      certificateEnabled: newCertificateEnabled,
       published: false,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+
+    setCreatedCourseId(created.id);
+    setNewCourseWizardStep(2);
+
     setCourses((prev) => [
       {
         id: created.id,
@@ -280,13 +305,405 @@ export default function InstructorCourses() {
       },
       ...prev,
     ]);
+  }
+
+  type ImportedLesson = {
+    title: string;
+    order?: number;
+    type?: "lesson" | "exercise";
+    content?: string;
+    blocks?: LessonBlock[];
+  };
+
+  type ImportedModule = {
+    title: string;
+    description?: string;
+    order?: number;
+    lessons?: ImportedLesson[];
+    questions?: Array<{ prompt: string; choices: string[]; correctIndex: number }>;
+  };
+
+  type ImportedResource = {
+    title: string;
+    description?: string;
+    url?: string;
+    content?: string;
+    blocks?: LessonBlock[];
+  };
+
+  type ImportedCourseJson = {
+    course?: {
+      title?: string;
+      description?: string;
+      thumbnailUrl?: string;
+      promoVideoUrl?: string;
+      level?: "beginner" | "intermediate" | "advanced";
+      durationHours?: number;
+      learnersCount?: number;
+      likesCount?: number;
+      certificateEnabled?: boolean;
+      published?: boolean;
+    };
+    modules?: ImportedModule[];
+    resources?: ImportedResource[];
+    finalQuestions?: Array<{ prompt: string; choices: string[]; correctIndex: number }>;
+  };
+
+  async function importCourseJsonToFirestore(courseId: string, rawJson: string) {
+    const text = rawJson.trim();
+    if (!text) return;
+
+    let parsed: ImportedCourseJson;
+    try {
+      parsed = JSON.parse(text) as ImportedCourseJson;
+    } catch (e) {
+      throw new Error("Invalid JSON.");
+    }
+
+    // Course doc update (merge)
+    const coursePatch = parsed.course ?? {};
+    await setDoc(
+      doc(firestore, "courses", courseId),
+      {
+        ...coursePatch,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    let batch = writeBatch(firestore);
+    let ops = 0;
+    const commitIfNeeded = async () => {
+      if (ops === 0) return;
+      await batch.commit();
+      batch = writeBatch(firestore);
+      ops = 0;
+    };
+
+    const modules = Array.isArray(parsed.modules) ? parsed.modules : [];
+    for (let mi = 0; mi < modules.length; mi += 1) {
+      const m = modules[mi];
+      const moduleRef = doc(collection(firestore, "courses", courseId, "modules"));
+      batch.set(moduleRef, {
+        title: m.title,
+        description: m.description ?? "",
+        order: typeof m.order === "number" ? m.order : mi + 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      ops += 1;
+      if (ops >= 450) await commitIfNeeded();
+
+      const lessons = Array.isArray(m.lessons) ? m.lessons : [];
+      for (let li = 0; li < lessons.length; li += 1) {
+        const l = lessons[li];
+        const lessonRef = doc(collection(firestore, "courses", courseId, "modules", moduleRef.id, "lessons"));
+        batch.set(lessonRef, {
+          title: l.title,
+          order: typeof l.order === "number" ? l.order : li + 1,
+          type: l.type ?? "lesson",
+          blocks: Array.isArray(l.blocks) ? l.blocks : null,
+          content: l.content ?? "",
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        ops += 1;
+        if (ops >= 450) await commitIfNeeded();
+      }
+
+      const questions = Array.isArray(m.questions) ? m.questions : [];
+      for (const q of questions) {
+        const qRef = doc(collection(firestore, "courses", courseId, "modules", moduleRef.id, "questions"));
+        batch.set(qRef, {
+          prompt: q.prompt,
+          choices: q.choices,
+          correctIndex: q.correctIndex,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        ops += 1;
+        if (ops >= 450) await commitIfNeeded();
+      }
+    }
+
+    const resources = Array.isArray(parsed.resources) ? parsed.resources : [];
+    for (const r of resources) {
+      const rRef = doc(collection(firestore, "courses", courseId, "resources"));
+      batch.set(rRef, {
+        title: r.title,
+        description: r.description ?? "",
+        url: r.url ?? "",
+        blocks: Array.isArray(r.blocks) ? r.blocks : null,
+        content: r.content ?? "",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      ops += 1;
+      if (ops >= 450) await commitIfNeeded();
+    }
+
+    const finalQuestions = Array.isArray(parsed.finalQuestions) ? parsed.finalQuestions : [];
+    for (const q of finalQuestions) {
+      const qRef = doc(collection(firestore, "courses", courseId, "final", "main", "questions"));
+      batch.set(qRef, {
+        prompt: q.prompt,
+        choices: q.choices,
+        correctIndex: q.correctIndex,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      ops += 1;
+      if (ops >= 450) await commitIfNeeded();
+    }
+
+    await commitIfNeeded();
+  }
+
+  function resetNewCourseWizard() {
+    setNewCourseWizardStep(1);
+    setCreatedCourseId(null);
+    setImportJson("");
+    setImportError(null);
+    setImporting(false);
     setNewTitle("");
     setNewDescription("");
+    setNewThumbnailUrl("");
+    setNewPromoVideoUrl("");
+    setNewLevel("beginner");
+    setNewDurationHours("");
+    setNewLearnersCount("");
+    setNewLikesCount("");
+    setNewCertificateEnabled(true);
   }
 
   async function deleteCourse(courseId: string) {
     await deleteDoc(doc(firestore, "courses", courseId));
     setCourses((prev) => prev.filter((c) => c.id !== courseId));
+  }
+
+  async function backfillFirstTwoCourseMedia() {
+    const ok = window.confirm("This will set course card images + promo videos for the first two seeded courses (SEO Foundations and Keyword Research). Continue?");
+    if (!ok) return;
+
+    setUpgrading(true);
+    setSeedProgress("Backfilling media for first two courses…");
+    try {
+      const snap = await getDocs(collection(firestore, "courses"));
+      const seeded = snap.docs.map((d) => ({ id: d.id, data: d.data() as { seedKey?: string } }));
+
+      const targets = ["seo-foundations", "keyword-intent"] as const;
+      for (const seedKey of targets) {
+        const row = seeded.find((c) => c.data.seedKey === seedKey) ?? null;
+        const meta = seedCourseMap[seedKey];
+        if (!row || !meta) continue;
+        await setDoc(
+          doc(firestore, "courses", row.id),
+          {
+            thumbnailUrl: meta.thumbnailUrl ?? null,
+            promoVideoUrl: meta.promoVideoUrl ?? null,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+
+      setSeedProgress("Media backfill complete.");
+    } catch {
+      setSeedProgress("Media backfill failed.");
+    } finally {
+      setUpgrading(false);
+    }
+  }
+
+  async function backfillSeededCourseVideos() {
+    const ok = window.confirm(
+      "This will update ALL seeded courses to use the latest promo video URLs and will rewrite lesson/resource video blocks to match. Continue?",
+    );
+    if (!ok) return;
+
+    setUpgrading(true);
+    setSeedProgress("Backfilling seeded course videos…");
+    try {
+      const snap = await getDocs(collection(firestore, "courses"));
+      const seeded = snap.docs.map((d) => ({ id: d.id, data: d.data() as { seedKey?: string } }));
+      const targets = seeded
+        .map((c) => ({ courseId: c.id, seedKey: c.data.seedKey ?? null }))
+        .filter((c): c is { courseId: string; seedKey: string } => typeof c.seedKey === "string" && c.seedKey.length > 0)
+        .filter((c) => Boolean(seedCourseMap[c.seedKey]));
+
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        const t = targets[idx];
+        const meta = seedCourseMap[t.seedKey];
+        if (!meta) continue;
+
+        setSeedProgress(`Backfilling videos ${idx + 1}/${targets.length}: ${meta.title}`);
+
+        let batch = writeBatch(firestore);
+        let ops = 0;
+        const commitIfNeeded = async () => {
+          if (ops === 0) return;
+          await batch.commit();
+          batch = writeBatch(firestore);
+          ops = 0;
+        };
+
+        batch.set(
+          doc(firestore, "courses", t.courseId),
+          {
+            promoVideoUrl: meta.promoVideoUrl ?? null,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        ops += 1;
+
+        const modulesRef = collection(firestore, "courses", t.courseId, "modules");
+        const modulesSnap = await getDocs(modulesRef);
+        for (const m of modulesSnap.docs) {
+          const lessonsRef = collection(firestore, "courses", t.courseId, "modules", m.id, "lessons");
+          const lessonsSnap = await getDocs(lessonsRef);
+          for (const l of lessonsSnap.docs) {
+            const ldata = l.data() as { blocks?: LessonBlock[] };
+            const blocks = Array.isArray(ldata.blocks) ? ldata.blocks : [];
+            if (blocks.length === 0) continue;
+            const nextBlocks = blocks.map((b) => {
+              if (!b || typeof b !== "object" || !("type" in b)) return b;
+              if (b.type !== "video") return b;
+              return { ...b, url: meta.promoVideoUrl ?? b.url };
+            });
+            batch.set(doc(lessonsRef, l.id), { blocks: nextBlocks, updatedAt: serverTimestamp() }, { merge: true });
+            ops += 1;
+            if (ops >= 450) await commitIfNeeded();
+          }
+        }
+
+        const resourcesRef = collection(firestore, "courses", t.courseId, "resources");
+        const resourcesSnap = await getDocs(resourcesRef);
+        for (const r of resourcesSnap.docs) {
+          const rdata = r.data() as { blocks?: LessonBlock[] };
+          const blocks = Array.isArray(rdata.blocks) ? rdata.blocks : [];
+          if (blocks.length === 0) continue;
+          const nextBlocks = blocks.map((b) => {
+            if (!b || typeof b !== "object" || !("type" in b)) return b;
+            if (b.type !== "video") return b;
+            return { ...b, url: meta.promoVideoUrl ?? b.url };
+          });
+          batch.set(doc(resourcesRef, r.id), { blocks: nextBlocks, updatedAt: serverTimestamp() }, { merge: true });
+          ops += 1;
+          if (ops >= 450) await commitIfNeeded();
+        }
+
+        await commitIfNeeded();
+      }
+
+      setSeedProgress("Video backfill complete.");
+    } catch {
+      setSeedProgress("Video backfill failed.");
+    } finally {
+      setUpgrading(false);
+    }
+  }
+
+  async function rewriteSeededLessonContentDetailed() {
+    const ok = window.confirm(
+      "This will OVERWRITE lesson titles/content/blocks for ALL seeded courses using the latest detailed curriculum template. Continue?",
+    );
+    if (!ok) return;
+
+    setUpgrading(true);
+    setSeedProgress("Rewriting seeded lesson content…");
+    try {
+      const snap = await getDocs(collection(firestore, "courses"));
+      const seeded = snap.docs
+        .map((d) => ({ id: d.id, data: d.data() as { seedKey?: string; title?: string } }))
+        .filter((c) => typeof c.data.seedKey === "string" && c.data.seedKey.length > 0);
+
+      const targets = seeded
+        .map((c) => ({ courseId: c.id, seedKey: c.data.seedKey as string, fallbackTitle: c.data.title ?? "Course" }))
+        .filter((c) => Boolean(seedCourseMap[c.seedKey]));
+
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        const t = targets[idx];
+        const meta = seedCourseMap[t.seedKey];
+        const courseTitle = meta?.title ?? t.fallbackTitle;
+        const moduleTheme = meta?.moduleTheme ?? "Module";
+
+        setSeedProgress(`Rewriting ${idx + 1}/${targets.length}: ${courseTitle}`);
+
+        const modulesRef = collection(firestore, "courses", t.courseId, "modules");
+        let modulesSnap;
+        try {
+          modulesSnap = await getDocs(query(modulesRef, orderBy("order", "asc")));
+        } catch {
+          modulesSnap = await getDocs(modulesRef);
+        }
+
+        for (const m of modulesSnap.docs) {
+          const mdata = m.data() as { title?: string; order?: number };
+          const moduleOrder = typeof mdata.order === "number" ? mdata.order : null;
+          const plannedTitle = moduleOrder ? moduleTitlesBySeedKey[t.seedKey]?.[moduleOrder - 1] : null;
+          const moduleTitle = plannedTitle ?? mdata.title ?? `${moduleTheme} Module`;
+
+          const desired = makeLessonsForModule(courseTitle, moduleTitle, {
+            heroVideoUrl: meta?.promoVideoUrl ?? null,
+            heroImageUrl: meta?.thumbnailUrl ?? null,
+          });
+
+          const lessonsRef = collection(firestore, "courses", t.courseId, "modules", m.id, "lessons");
+          let lessonsSnap;
+          try {
+            lessonsSnap = await getDocs(query(lessonsRef, orderBy("order", "asc")));
+          } catch {
+            lessonsSnap = await getDocs(lessonsRef);
+          }
+
+          const existingByOrder = new Map<number, { id: string }>();
+          for (const l of lessonsSnap.docs) {
+            const ldata = l.data() as { order?: number };
+            if (typeof ldata.order === "number") existingByOrder.set(ldata.order, { id: l.id });
+          }
+
+          let batch = writeBatch(firestore);
+          let ops = 0;
+          const commitIfNeeded = async () => {
+            if (ops === 0) return;
+            await batch.commit();
+            batch = writeBatch(firestore);
+            ops = 0;
+          };
+
+          for (const lesson of desired) {
+            const existing = existingByOrder.get(lesson.order) ?? null;
+            const targetRef = existing ? doc(lessonsRef, existing.id) : doc(lessonsRef);
+            batch.set(
+              targetRef,
+              {
+                type: lesson.type,
+                order: lesson.order,
+                title: lesson.title,
+                blocks: lesson.blocks ?? null,
+                content: lesson.content,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true },
+            );
+            ops += 1;
+            if (ops >= 450) await commitIfNeeded();
+          }
+
+          await commitIfNeeded();
+        }
+
+        await setDoc(doc(firestore, "courses", t.courseId), { updatedAt: serverTimestamp() }, { merge: true });
+      }
+
+      setSeedProgress("Rewrite complete.");
+    } catch {
+      setSeedProgress("Rewrite failed.");
+    } finally {
+      setUpgrading(false);
+      setTimeout(() => setSeedProgress(null), 5000);
+    }
   }
 
   type SeedCourse = {
@@ -295,8 +712,22 @@ export default function InstructorCourses() {
     title: string;
     description: string;
     moduleTheme: string;
+    thumbnailUrl?: string;
+    promoVideoUrl?: string;
+    level?: "beginner" | "intermediate" | "advanced";
+    durationHours?: number;
+    learnersCount?: number;
+    likesCount?: number;
+    certificateEnabled?: boolean;
     resources: Array<{ title: string; description: string; url: string; content: string }>;
   };
+
+  type LessonBlock =
+    | { type: "text"; markdown: string }
+    | { type: "image"; url: string; caption?: string }
+    | { type: "video"; url: string; title?: string }
+    | { type: "link"; url: string; title?: string; description?: string }
+    | { type: "divider" };
 
   const seedCourseMap: Record<string, Omit<SeedCourse, "description" | "resources"> & { description: string; resources: SeedCourse["resources"] }> = {
     "seo-foundations": {
@@ -305,6 +736,9 @@ export default function InstructorCourses() {
       title: "SEO Foundations",
       description: "Core search concepts: crawling, indexing, ranking, and quality signals.",
       moduleTheme: "Foundations",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1556155092-490a1ba16284?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=jwgnwtQcSWQ",
       resources: [
         {
           title: "Search Essentials",
@@ -328,6 +762,9 @@ export default function InstructorCourses() {
       title: "Keyword Research & Intent",
       description: "Build keyword maps and intent-driven content plans.",
       moduleTheme: "Keywords",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=gEWkYTPSEjs",
       resources: [
         {
           title: "Search quality rater guidelines",
@@ -344,6 +781,9 @@ export default function InstructorCourses() {
       title: "On-Page SEO & Content Structure",
       description: "Write and structure content for humans and machines.",
       moduleTheme: "On-Page",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=bGPB-rtxt-I",
       resources: [
         {
           title: "Create helpful content",
@@ -367,6 +807,9 @@ export default function InstructorCourses() {
       title: "Technical SEO",
       description: "Make your site crawlable, fast, indexable, and stable.",
       moduleTheme: "Technical",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1555066931-4365d14bab8c?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=am4g0hXAA8Q",
       resources: [
         {
           title: "Technical SEO basics",
@@ -390,6 +833,9 @@ export default function InstructorCourses() {
       title: "Metadata & SERP Optimization",
       description: "Titles, descriptions, canonicals, and SERP preview best practices.",
       moduleTheme: "Metadata",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=am4g0hXAA8Q",
       resources: [
         {
           title: "Control your snippets",
@@ -413,6 +859,9 @@ export default function InstructorCourses() {
       title: "Schema & Entities",
       description: "Structured data and entity understanding.",
       moduleTheme: "Schema",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1526374870839-e155464bb9b2?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=yTG0nbPgUss",
       resources: [
         {
           title: "Structured data documentation",
@@ -436,6 +885,9 @@ export default function InstructorCourses() {
       title: "AEO Fundamentals",
       description: "Answer Engine Optimization: create content that AI can extract reliably.",
       moduleTheme: "AEO",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1515879218367-8466d910aaa4?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=jwgnwtQcSWQ",
       resources: [
         {
           title: "Helpful content for AI extraction",
@@ -459,6 +911,9 @@ export default function InstructorCourses() {
       title: "SEO + AEO Capstone",
       description: "Combine SEO and AEO into a single publish-ready page and strategy.",
       moduleTheme: "Capstone",
+      thumbnailUrl:
+        "https://images.unsplash.com/photo-1553877522-43269d4ea984?auto=format&fit=crop&w=1200&q=80",
+      promoVideoUrl: "https://www.youtube.com/watch?v=bGPB-rtxt-I",
       resources: [
         {
           title: "Search appearance overview",
@@ -588,7 +1043,11 @@ export default function InstructorCourses() {
     });
   }
 
-  function makeLessonsForModule(courseTitle: string, moduleTitle: string) {
+  function makeLessonsForModule(
+    courseTitle: string,
+    moduleTitle: string,
+    media?: { heroVideoUrl?: string | null; heroImageUrl?: string | null },
+  ) {
     const topics = [
       "Key concepts & definitions",
       "How it works (step-by-step)",
@@ -602,27 +1061,98 @@ export default function InstructorCourses() {
       "Summary & next actions",
     ];
 
+    const referenceLinks = [
+      "https://developers.google.com/search/docs/fundamentals/seo-starter-guide",
+      "https://developers.google.com/search/docs/crawling-indexing/overview",
+      "https://developers.google.com/search/docs/appearance/snippet",
+      "https://developers.google.com/search/docs/appearance/structured-data/intro-structured-data",
+      "https://web.dev/learn-core-web-vitals/",
+      "https://schema.org/",
+      "https://developers.google.com/search/blog",
+      "https://developers.google.com/search/docs/crawling-indexing/sitemaps/overview",
+      "https://developers.google.com/search/docs/appearance/structured-data",
+      "https://developers.google.com/search/docs/appearance/page-experience",
+    ];
+
     const lessons = Array.from({ length: 10 }).map((_, i) => {
       const n = i + 1;
       const heading = topics[i] ?? `Lesson ${n}`;
+      const heroVideo =
+        (media?.heroVideoUrl ?? "").trim() || "https://www.youtube.com/watch?v=Y4rImdZ3FVc";
+      const heroImage =
+        (media?.heroImageUrl ?? "").trim() ||
+        "https://images.unsplash.com/photo-1454165205744-3b78555e5572?auto=format&fit=crop&w=1600&q=80";
+      const secondaryImage =
+        "https://images.unsplash.com/photo-1556761175-4b46a572b786?auto=format&fit=crop&w=1600&q=80";
+
+      const refUrl = referenceLinks[i % referenceLinks.length] ?? "https://developers.google.com/search/docs";
+      const blocks: LessonBlock[] = [
+        {
+          type: "text",
+          markdown:
+            `Learning outcomes\n\n` +
+            `- Define the key terms for: **${heading}**.\n` +
+            `- Apply a step-by-step method to improve one page.\n` +
+            `- Validate your result using at least one check.\n\n` +
+            `You are in: **${courseTitle}**.\n` +
+            `Module: **${moduleTitle}**.\n` +
+            `Lesson focus: **${heading}**.\n\n` +
+            `Direct answer\n\n` +
+            `In practice, **${heading.toLowerCase()}** matters because it changes how search engines and users understand your page. The goal is to make the next action obvious: what to change, where to change it, and how to confirm it worked.`,
+        },
+        { type: "divider" },
+        { type: "video", url: heroVideo, title: "Watch: Quick concept primer" },
+        { type: "divider" },
+        { type: "image", url: heroImage, caption: "Use this as your checklist reference while learning." },
+        { type: "image", url: secondaryImage, caption: "Example context you can adapt to your own website." },
+        {
+          type: "text",
+          markdown:
+            `Step-by-step\n\n` +
+            `1) Pick one target page (URL)\n` +
+            `2) Write the page intent in 8 words\n` +
+            `3) Find the main section where **${heading.toLowerCase()}** applies\n` +
+            `4) Make one improvement (small + measurable)\n` +
+            `5) Re-read the page: does the first 10 seconds make sense?\n\n` +
+            `Common mistakes\n\n` +
+            `- Doing 10 changes at once (can’t measure impact)\n` +
+            `- Optimizing for keywords but ignoring clarity\n` +
+            `- No validation step (you never confirm)\n\n` +
+            `Examples\n\n` +
+            `- Before: "We offer many services"\n` +
+            `  After: "We help you fix crawl and indexing issues in 7 days"\n\n` +
+            `Validation\n\n` +
+            `- Check page rendering and the key elements you changed\n` +
+            `- Confirm links work and headings match the intent\n\n` +
+            `Mini assignment\n\n` +
+            `Write 5 bullet points explaining what you changed and why.`,
+        },
+        { type: "divider" },
+        { type: "link", url: refUrl, title: "Reference (read next)", description: `Use this reference to deepen: ${heading}` },
+      ];
       return {
         type: "lesson" as const,
         order: n,
         title: `${moduleTitle} - ${heading}`,
+        blocks,
         content:
           `Learning Outcomes\n` +
-          `- Explain the purpose of this lesson in one sentence.\n` +
-          `- Apply the checklist to a real page.\n\n` +
+          `- Define key terms for: ${heading}\n` +
+          `- Apply a step-by-step improvement\n` +
+          `- Validate the result\n\n` +
           `Lesson\n` +
-          `This section teaches a practical skill inside: ${courseTitle}.\n` +
-          `Module: ${moduleTitle}.\n\n` +
-          `Checklist\n` +
-          `1) Identify the intent of the page\n` +
-          `2) Extract the primary keyword + 3 secondary terms\n` +
-          `3) Write a clear structure (H1/H2/H3)\n` +
-          `4) Add internal links to relevant pages\n\n` +
-          `Quick Exercise\n` +
-          `Write 5 bullets describing what you would change on a page to improve outcomes.`,
+          `Course: ${courseTitle}\n` +
+          `Module: ${moduleTitle}\n` +
+          `Focus: ${heading}\n\n` +
+          `Step-by-step\n` +
+          `1) Pick one target page (URL)\n` +
+          `2) Write the page intent in 8 words\n` +
+          `3) Improve one element related to: ${heading}\n` +
+          `4) Re-check clarity and structure\n\n` +
+          `Mini assignment\n` +
+          `Write 5 bullets explaining what you changed and how you validated it.\n\n` +
+          `Reference\n` +
+          `${refUrl}`,
       };
     });
 
@@ -630,6 +1160,21 @@ export default function InstructorCourses() {
       type: "exercise" as const,
       order: 11,
       title: `${moduleTitle} - Exercise`,
+      blocks: [
+        {
+          type: "text",
+          markdown:
+            `Exercise\n\n` +
+            `Goal: apply what you learned in **${moduleTitle}**.\n\n` +
+            `Tasks\n\n` +
+            `1) Pick one page/topic\n` +
+            `2) Write a title + meta description\n` +
+            `3) Draft an outline with headings\n` +
+            `4) Create 3 internal links and 1 FAQ block\n\n` +
+            `Completion rule\n\n` +
+            `Mark this exercise complete only when you can explain your choices in 60 seconds.`,
+        },
+      ],
       content:
         `Exercise (submit to yourself)\n\n` +
         `Goal: apply what you learned in ${moduleTitle}.\n\n` +
@@ -748,7 +1293,10 @@ export default function InstructorCourses() {
             if (typeof ldata.order === "number") existingLessonOrders.add(ldata.order);
           }
 
-          const desiredLessons = makeLessonsForModule(courseTitle, moduleTitle);
+          const desiredLessons = makeLessonsForModule(courseTitle, moduleTitle, {
+            heroVideoUrl: meta?.promoVideoUrl ?? null,
+            heroImageUrl: meta?.thumbnailUrl ?? null,
+          });
           for (const lesson of desiredLessons) {
             const existing = lessonsSnap.docs.find((d) => (d.data() as { order?: number }).order === lesson.order) ?? null;
             if (!existing) {
@@ -802,6 +1350,53 @@ export default function InstructorCourses() {
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
               });
+              ops += 1;
+              if (ops >= 450) await commitIfNeeded();
+            }
+          }
+
+          // Module resources
+          if (meta?.resources && Array.isArray(meta.resources) && meta.resources.length > 0) {
+            const modResourcesRef = collection(firestore, "courses", c.id, "modules", moduleId, "resources");
+            const existingSnap = await getDocs(modResourcesRef);
+            const existingTitles = new Set(
+              existingSnap.docs.map((d) => (d.data() as { title?: string }).title ?? "").filter((t) => t.trim().length > 0),
+            );
+
+            for (const r of meta.resources) {
+              const title = (r.title ?? "").trim();
+              if (!title || existingTitles.has(title)) continue;
+              const rRef = doc(modResourcesRef);
+              const resourceBlocks: LessonBlock[] = [
+                { type: "text", markdown: `Summary\n\n${r.content}` },
+                { type: "divider" },
+                {
+                  type: "image",
+                  url:
+                    meta.thumbnailUrl ??
+                    "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1600&q=80",
+                  caption: "Resource visual",
+                },
+                {
+                  type: "video",
+                  url: meta.promoVideoUrl ?? "https://www.youtube.com/watch?v=jwgnwtQcSWQ",
+                  title: "Watch",
+                },
+                r.url ? { type: "link", url: r.url, title: "Open resource", description: r.description } : { type: "divider" },
+              ];
+              batch.set(
+                rRef,
+                {
+                  title,
+                  description: r.description ?? "",
+                  url: r.url ?? "",
+                  blocks: resourceBlocks,
+                  content: r.content ?? "",
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                },
+                { merge: true },
+              );
               ops += 1;
               if (ops >= 450) await commitIfNeeded();
             }
@@ -877,6 +1472,13 @@ export default function InstructorCourses() {
           title: "SEO Foundations",
           description: "Core search concepts: crawling, indexing, ranking, and quality signals.",
           moduleTheme: "Foundations",
+          thumbnailUrl: seedCourseMap["seo-foundations"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["seo-foundations"].promoVideoUrl,
+          level: "beginner",
+          durationHours: 3,
+          learnersCount: 11748,
+          likesCount: 71,
+          certificateEnabled: true,
           resources: [
             {
               title: "Search Essentials",
@@ -900,6 +1502,13 @@ export default function InstructorCourses() {
           title: "Keyword Research & Intent",
           description: "Build keyword maps and intent-driven content plans.",
           moduleTheme: "Keywords",
+          thumbnailUrl: seedCourseMap["keyword-intent"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["keyword-intent"].promoVideoUrl,
+          level: "beginner",
+          durationHours: 3,
+          learnersCount: 22477,
+          likesCount: 233,
+          certificateEnabled: true,
           resources: [
             {
               title: "Search quality rater guidelines",
@@ -916,6 +1525,13 @@ export default function InstructorCourses() {
           title: "On-Page SEO & Content Structure",
           description: "Write and structure content for humans and machines.",
           moduleTheme: "On-Page",
+          thumbnailUrl: seedCourseMap["onpage-content"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["onpage-content"].promoVideoUrl,
+          level: "intermediate",
+          durationHours: 4,
+          learnersCount: 16323,
+          likesCount: 125,
+          certificateEnabled: true,
           resources: [
             {
               title: "Create helpful content",
@@ -932,6 +1548,13 @@ export default function InstructorCourses() {
           title: "Technical SEO",
           description: "Make your site crawlable, fast, indexable, and stable.",
           moduleTheme: "Technical",
+          thumbnailUrl: seedCourseMap["technical-seo"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["technical-seo"].promoVideoUrl,
+          level: "intermediate",
+          durationHours: 4,
+          learnersCount: 9050,
+          likesCount: 180,
+          certificateEnabled: true,
           resources: [
             {
               title: "Technical SEO basics",
@@ -948,6 +1571,13 @@ export default function InstructorCourses() {
           title: "Metadata & SERP Optimization",
           description: "Titles, descriptions, canonicals, and SERP preview best practices.",
           moduleTheme: "Metadata",
+          thumbnailUrl: seedCourseMap["metadata-serp"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["metadata-serp"].promoVideoUrl,
+          level: "beginner",
+          durationHours: 2,
+          learnersCount: 6100,
+          likesCount: 96,
+          certificateEnabled: true,
           resources: [
             {
               title: "Control your snippets",
@@ -964,6 +1594,13 @@ export default function InstructorCourses() {
           title: "Schema & Entities",
           description: "Structured data and entity understanding.",
           moduleTheme: "Schema",
+          thumbnailUrl: seedCourseMap["schema-entities"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["schema-entities"].promoVideoUrl,
+          level: "intermediate",
+          durationHours: 3,
+          learnersCount: 4200,
+          likesCount: 88,
+          certificateEnabled: true,
           resources: [
             {
               title: "Structured data documentation",
@@ -980,6 +1617,13 @@ export default function InstructorCourses() {
           title: "AEO Fundamentals",
           description: "Answer Engine Optimization: create content that AI can extract reliably.",
           moduleTheme: "AEO",
+          thumbnailUrl: seedCourseMap["aeo-fundamentals"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["aeo-fundamentals"].promoVideoUrl,
+          level: "intermediate",
+          durationHours: 3,
+          learnersCount: 5200,
+          likesCount: 140,
+          certificateEnabled: true,
           resources: [
             {
               title: "Helpful content for AI extraction",
@@ -996,6 +1640,13 @@ export default function InstructorCourses() {
           title: "SEO + AEO Capstone",
           description: "Combine SEO and AEO into a single publish-ready page and strategy.",
           moduleTheme: "Capstone",
+          thumbnailUrl: seedCourseMap["seo-aeo-capstone"].thumbnailUrl,
+          promoVideoUrl: seedCourseMap["seo-aeo-capstone"].promoVideoUrl,
+          level: "advanced",
+          durationHours: 5,
+          learnersCount: 3000,
+          likesCount: 60,
+          certificateEnabled: true,
           resources: [
             {
               title: "Search appearance overview",
@@ -1033,6 +1684,13 @@ export default function InstructorCourses() {
           order: c.order,
           title: c.title,
           description: c.description,
+          thumbnailUrl: c.thumbnailUrl ?? null,
+          promoVideoUrl: c.promoVideoUrl ?? null,
+          level: c.level ?? null,
+          durationHours: typeof c.durationHours === "number" ? c.durationHours : null,
+          learnersCount: typeof c.learnersCount === "number" ? c.learnersCount : null,
+          likesCount: typeof c.likesCount === "number" ? c.likesCount : null,
+          certificateEnabled: c.certificateEnabled === true,
           published: true,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -1062,13 +1720,17 @@ export default function InstructorCourses() {
           });
           ops += 1;
 
-          const lessons = makeLessonsForModule(c.title, moduleTitle);
+          const lessons = makeLessonsForModule(c.title, moduleTitle, {
+            heroVideoUrl: c.promoVideoUrl ?? null,
+            heroImageUrl: c.thumbnailUrl ?? null,
+          });
           for (const lesson of lessons) {
             const lessonRef = doc(collection(firestore, "courses", courseId, "modules", moduleRef.id, "lessons"));
             batch.set(lessonRef, {
               type: lesson.type,
               order: lesson.order,
               title: lesson.title,
+              blocks: lesson.blocks ?? null,
               content: lesson.content,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -1076,7 +1738,6 @@ export default function InstructorCourses() {
             ops += 1;
             if (ops >= 450) await commitIfNeeded();
           }
-
           const bank = makeQuestionBank(`${c.title} / ${moduleTitle}`, 25);
           for (const q of bank) {
             const qRef = doc(collection(firestore, "courses", courseId, "modules", moduleRef.id, "questions"));
@@ -1090,14 +1751,51 @@ export default function InstructorCourses() {
             ops += 1;
             if (ops >= 450) await commitIfNeeded();
           }
+
+          // Module resources (copy course resources into every module)
+          for (const r of c.resources) {
+            const rRef = doc(collection(firestore, "courses", courseId, "modules", moduleRef.id, "resources"));
+            const resourceBlocks: LessonBlock[] = [
+              { type: "text", markdown: `Summary\n\n${r.content}` },
+              { type: "divider" },
+              {
+                type: "image",
+                url:
+                  c.thumbnailUrl ??
+                  "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1600&q=80",
+                caption: "Resource visual",
+              },
+              { type: "video", url: c.promoVideoUrl ?? "https://www.youtube.com/watch?v=jwgnwtQcSWQ", title: "Watch" },
+              r.url ? { type: "link", url: r.url, title: "Open resource", description: r.description } : { type: "divider" },
+            ];
+            batch.set(rRef, {
+              title: r.title,
+              description: r.description,
+              url: r.url,
+              blocks: resourceBlocks,
+              content: r.content,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            ops += 1;
+            if (ops >= 450) await commitIfNeeded();
+          }
         }
 
         for (const r of c.resources) {
           const rRef = doc(collection(firestore, "courses", courseId, "resources"));
+          const resourceBlocks: LessonBlock[] = [
+            { type: "text", markdown: `Summary\n\n${r.content}` },
+            { type: "divider" },
+            { type: "image", url: c.thumbnailUrl ?? "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1600&q=80", caption: "Resource visual" },
+            { type: "video", url: c.promoVideoUrl ?? "https://www.youtube.com/watch?v=Y4rImdZ3FVc", title: "Watch" },
+            r.url ? { type: "link", url: r.url, title: "Open resource", description: r.description } : { type: "divider" },
+          ];
           batch.set(rRef, {
             title: r.title,
             description: r.description,
             url: r.url,
+            blocks: resourceBlocks,
             content: r.content,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -1158,42 +1856,241 @@ export default function InstructorCourses() {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <CardTitle>Courses</CardTitle>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Button variant="outline" onClick={() => void seedStarterCurriculum()} disabled={seeding}>
                   {seeding ? "Seeding…" : "Seed 8 courses"}
                 </Button>
                 <Button variant="outline" onClick={() => void upgradeSeededCourses()} disabled={upgrading || seeding}>
                   {upgrading ? "Upgrading…" : "Upgrade seeded courses"}
                 </Button>
+                <Button
+                  variant="outline"
+                  disabled={upgrading || seeding}
+                  onClick={() => {
+                    void rewriteSeededLessonContentDetailed();
+                  }}
+                >
+                  Rewrite lessons (detailed)
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={upgrading || seeding}
+                  onClick={() => {
+                    void backfillSeededCourseVideos();
+                  }}
+                >
+                  Backfill videos (all)
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={upgrading || seeding}
+                  onClick={() => {
+                    void backfillFirstTwoCourseMedia();
+                  }}
+                >
+                  Backfill media (first 2)
+                </Button>
                 <Dialog>
                   <DialogTrigger asChild>
                     <Button variant="outline">Create course</Button>
                   </DialogTrigger>
-                  <DialogContent>
+                  <DialogContent
+                    onInteractOutside={() => {
+                      resetNewCourseWizard();
+                    }}
+                    onEscapeKeyDown={() => {
+                      resetNewCourseWizard();
+                    }}
+                  >
                     <DialogHeader>
                       <DialogTitle>New course</DialogTitle>
                     </DialogHeader>
 
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <div className="text-sm text-muted-foreground">Title</div>
-                        <Input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Course title" />
-                      </div>
-                      <div className="space-y-2">
-                        <div className="text-sm text-muted-foreground">Description</div>
-                        <Textarea
-                          value={newDescription}
-                          onChange={(e) => setNewDescription(e.target.value)}
-                          placeholder="What will students learn?"
-                        />
-                      </div>
-                    </div>
+                    {newCourseWizardStep === 1 && (
+                      <>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <div className="text-sm text-muted-foreground">Title</div>
+                            <Input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Course title" />
+                          </div>
 
-                    <DialogFooter>
-                      <Button onClick={() => void createCourse()} disabled={!newTitle.trim()}>
-                        Create
-                      </Button>
-                    </DialogFooter>
+                          <div className="space-y-2">
+                            <div className="text-sm text-muted-foreground">Description</div>
+                            <Textarea
+                              value={newDescription}
+                              onChange={(e) => setNewDescription(e.target.value)}
+                              placeholder="What will students learn?"
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="text-sm text-muted-foreground">Image URL (course card)</div>
+                            <Input
+                              value={newThumbnailUrl}
+                              onChange={(e) => setNewThumbnailUrl(e.target.value)}
+                              placeholder="https://..."
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="text-sm text-muted-foreground">Promo video URL</div>
+                            <Input
+                              value={newPromoVideoUrl}
+                              onChange={(e) => setNewPromoVideoUrl(e.target.value)}
+                              placeholder="https://www.youtube.com/watch?v=..."
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <div className="text-sm text-muted-foreground">Level</div>
+                              <select
+                                className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                                value={newLevel}
+                                onChange={(e) => setNewLevel(e.target.value as "beginner" | "intermediate" | "advanced")}
+                              >
+                                <option value="beginner">Beginner</option>
+                                <option value="intermediate">Intermediate</option>
+                                <option value="advanced">Advanced</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="text-sm text-muted-foreground">Duration (hours)</div>
+                              <Input
+                                inputMode="numeric"
+                                value={newDurationHours}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (!v) return setNewDurationHours("");
+                                  const n = Number(v);
+                                  if (!Number.isFinite(n)) return;
+                                  setNewDurationHours(n);
+                                }}
+                                placeholder="3"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <div className="text-sm text-muted-foreground">Learners</div>
+                              <Input
+                                inputMode="numeric"
+                                value={newLearnersCount}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (!v) return setNewLearnersCount("");
+                                  const n = Number(v);
+                                  if (!Number.isFinite(n)) return;
+                                  setNewLearnersCount(n);
+                                }}
+                                placeholder="11748"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <div className="text-sm text-muted-foreground">Likes</div>
+                              <Input
+                                inputMode="numeric"
+                                value={newLikesCount}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (!v) return setNewLikesCount("");
+                                  const n = Number(v);
+                                  if (!Number.isFinite(n)) return;
+                                  setNewLikesCount(n);
+                                }}
+                                placeholder="71"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
+                            <div>
+                              <div className="text-sm font-medium text-foreground">Certificate</div>
+                              <div className="text-xs text-muted-foreground">Show certificate badge on the course card.</div>
+                            </div>
+                            <input
+                              type="checkbox"
+                              checked={newCertificateEnabled}
+                              onChange={(e) => setNewCertificateEnabled(e.target.checked)}
+                            />
+                          </div>
+                        </div>
+
+                        <DialogFooter>
+                          <Button
+                            onClick={() => {
+                              void createCourse();
+                            }}
+                            disabled={!newTitle.trim()}
+                          >
+                            Next
+                          </Button>
+                        </DialogFooter>
+                      </>
+                    )}
+
+                    {newCourseWizardStep === 2 && createdCourseId && (
+                      <>
+                        <div className="space-y-3">
+                          <div className="text-sm text-muted-foreground">
+                            Course created. Add content now or import a JSON file to populate modules, lessons, resources, exercises, and tests.
+                          </div>
+
+                          <div className="rounded-lg border border-border p-3">
+                            <div className="text-xs text-muted-foreground">Course ID</div>
+                            <div className="text-sm font-medium text-foreground break-all">{createdCourseId}</div>
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="text-sm text-muted-foreground">Import JSON</div>
+                            <Textarea
+                              value={importJson}
+                              onChange={(e) => setImportJson(e.target.value)}
+                              placeholder='{"course": {"published": true}, "modules": [...], "resources": [...], "finalQuestions": [...]}'
+                              className="min-h-[180px] font-mono text-xs"
+                            />
+                            {importError ? <div className="text-sm text-destructive">{importError}</div> : null}
+                          </div>
+                        </div>
+
+                        <DialogFooter>
+                          <Button asChild variant="outline">
+                            <Link to={`/instructors/courses/${createdCourseId}`}>Open editor</Link>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              resetNewCourseWizard();
+                            }}
+                          >
+                            Done
+                          </Button>
+                          <Button
+                            disabled={importing || !importJson.trim()}
+                            onClick={() => {
+                              void (async () => {
+                                setImportError(null);
+                                setImporting(true);
+                                try {
+                                  await importCourseJsonToFirestore(createdCourseId, importJson);
+                                  await setDoc(
+                                    doc(firestore, "courses", createdCourseId),
+                                    { published: true, updatedAt: serverTimestamp() },
+                                    { merge: true },
+                                  );
+                                  setImportJson("");
+                                } catch (e) {
+                                  const msg = e instanceof Error ? e.message : String(e);
+                                  setImportError(msg);
+                                } finally {
+                                  setImporting(false);
+                                }
+                              })();
+                            }}
+                          >
+                            {importing ? "Importing…" : "Import JSON"}
+                          </Button>
+                        </DialogFooter>
+                      </>
+                    )}
                   </DialogContent>
                 </Dialog>
               </div>

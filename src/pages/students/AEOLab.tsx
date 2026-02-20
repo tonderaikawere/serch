@@ -39,6 +39,8 @@ export default function AEOLab() {
   const [aeoScore, setAeoScore] = useState(0);
   const [checks, setChecks] = useState<ClarityCheck[]>([]);
   const [analyzedAt, setAnalyzedAt] = useState<number | null>(null);
+  const [completed, setCompleted] = useState(false);
+  const [completedAt, setCompletedAt] = useState<number | null>(null);
 
   const uid = profile?.uid ?? null;
 
@@ -52,6 +54,8 @@ export default function AEOLab() {
     score: number;
     checks: ClarityCheck[];
     analyzedAt: number | null;
+    completed?: boolean;
+    completedAt?: number | null;
   }) {
     if (!uid) return;
     await setDoc(
@@ -59,6 +63,7 @@ export default function AEOLab() {
       {
         ...next,
         updatedAt: serverTimestamp(),
+        completedAt: next.completed ? serverTimestamp() : null,
       },
       { merge: true },
     ).catch(() => {});
@@ -87,12 +92,19 @@ export default function AEOLab() {
         score?: number;
         checks?: ClarityCheck[];
         analyzedAt?: number | null;
+        completed?: boolean;
+        completedAt?: unknown;
       };
       if (typeof data.selectedQuestionId === "number") setSelectedQuestion(data.selectedQuestionId);
       if (typeof data.answer === "string") setAnswer(data.answer);
       if (typeof data.score === "number") setAeoScore(data.score);
       if (Array.isArray(data.checks)) setChecks(data.checks);
       if (typeof data.analyzedAt === "number") setAnalyzedAt(data.analyzedAt);
+      if (typeof data.completed === "boolean") setCompleted(data.completed);
+      const ms = data.completedAt && typeof data.completedAt === "object" && data.completedAt && "toMillis" in data.completedAt
+        ? (data.completedAt as { toMillis: () => number }).toMillis()
+        : null;
+      if (typeof ms === "number") setCompletedAt(ms);
     })();
     return () => {
       cancelled = true;
@@ -165,19 +177,59 @@ export default function AEOLab() {
 
   const passedChecks = checks.filter((c) => c.passed).length;
 
+  const improvementHints = useMemo(() => {
+    const hints: string[] = [];
+    const byLabel = new Map(checks.map((c) => [c.label, c.passed] as const));
+    if (checks.length === 0) return hints;
+
+    if (byLabel.get("Direct answer in the first sentence") === false) {
+      hints.push("Start with a direct one-sentence answer (define/answer first, explain after)." );
+    }
+    if (byLabel.get("Answer length is 40–60 words") === false) {
+      hints.push("Aim for 40–60 words: concise but complete. Remove filler or add a missing key detail." );
+    }
+    if (byLabel.get("Clear structure (bullets or steps)") === false) {
+      hints.push("Add structure using bullets (- item) or steps (1) ...)." );
+    }
+    if (byLabel.get("Uses specifics (numbers/examples)") === false) {
+      hints.push("Add specifics: a number, a short example, or a concrete rule of thumb." );
+    }
+    if (byLabel.get("Avoids vague jargon") === false) {
+      hints.push("Remove vague buzzwords and replace them with plain language." );
+    }
+    return hints;
+  }, [checks]);
+
+  useEffect(() => {
+    const nextCompleted = aeoScore >= 80 && checks.length > 0;
+    setCompleted(nextCompleted);
+  }, [aeoScore, checks.length]);
+
   return (
     <DashboardLayout>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold text-foreground">AEO Question & Answer Lab</h1>
             <p className="text-muted-foreground mt-1">
               Optimize your content for AI answer engines
             </p>
           </div>
-          <div className="flex items-center gap-4">
-            <ScoreRing score={aeoScore} label="AEO Score" variant="aeo" size={80} />
+          <div className="flex items-center gap-3 sm:justify-end flex-wrap">
+            {completed ? (
+              <Badge className="bg-success/10 text-success border border-success/20" variant="outline">
+                Completed
+              </Badge>
+            ) : (
+              <Badge className="bg-muted text-muted-foreground" variant="outline">
+                Not completed
+              </Badge>
+            )}
+            <Badge className="bg-muted text-muted-foreground" variant="outline">
+              {analyzedAt ? `Analyzed: ${new Date(analyzedAt).toLocaleString()}` : "Not analyzed yet"}
+            </Badge>
+            <ScoreRing score={aeoScore} label="%" variant="aeo" size={80} />
           </div>
         </div>
 
@@ -208,7 +260,7 @@ export default function AEOLab() {
                     <p className="text-sm font-medium text-foreground">{q.question}</p>
                     {q.selected && <CheckCircle2 className="w-4 h-4 text-primary flex-shrink-0" />}
                   </div>
-                  <div className="flex gap-2 mt-2">
+                  <div className="flex gap-2 mt-2 flex-wrap">
                     <Badge variant="outline" className="text-xs">{q.intent}</Badge>
                     <Badge 
                       variant="outline" 
@@ -265,25 +317,34 @@ export default function AEOLab() {
                 </span>
               </div>
 
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
-                  className="flex-1"
+                  className="w-full sm:flex-1"
                   disabled={!selectedQuestion || !answer.trim()}
                   onClick={() => {
                     const nextChecks = computeChecks(answer);
                     const score = computeScore(nextChecks);
                     const ts = Date.now();
+                    const nextCompleted = score >= 80;
                     setChecks(nextChecks);
                     setAeoScore(score);
                     setAnalyzedAt(ts);
+                    setCompleted(nextCompleted);
                     void persistWorkspace({
                       selectedQuestionId: selectedQuestion,
                       answer,
                       score,
                       checks: nextChecks,
                       analyzedAt: ts,
+                      completed: nextCompleted,
+                      completedAt: nextCompleted ? ts : null,
                     });
                     void logEvent("aeo_analyzed", "AEO answer analyzed", { score });
+
+                    if (uid && nextCompleted && !completed) {
+                      setCompletedAt(ts);
+                      void logEvent("aeo_completed", "AEO Lab completed", { score });
+                    }
                   }}
                 >
                   <Sparkles className="w-4 h-4 mr-2" />
@@ -291,6 +352,7 @@ export default function AEOLab() {
                 </Button>
                 <Button
                   variant="outline"
+                  className="w-full sm:w-auto"
                   onClick={() => {
                     void saveDraft().catch(() => {});
                   }}
@@ -331,6 +393,23 @@ export default function AEOLab() {
                   </div>
                 ))}
               </div>
+
+              {improvementHints.length > 0 && (
+                <div className="pt-4 border-t border-border space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <AlertTriangle className="w-4 h-4 text-warning" />
+                    What to fix
+                  </div>
+                  <ul className="space-y-1 text-sm text-muted-foreground">
+                    {improvementHints.map((h) => (
+                      <li key={h} className="flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
+                        <span>{h}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               
               <div className="pt-4 border-t border-border">
                 <div className="flex items-center justify-between mb-2">

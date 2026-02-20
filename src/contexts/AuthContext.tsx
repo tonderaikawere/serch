@@ -102,6 +102,19 @@ async function getFirestoreHub(uid: string): Promise<string | null> {
 }
 
 async function upsertBaseUserDoc(user: User, role: AppRole | null) {
+  const throttleKey = `auth:lastUpsertUserDoc:${user.uid}`;
+  try {
+    const last = Number(localStorage.getItem(throttleKey) ?? "0");
+    const now = Date.now();
+    const sixHours = 6 * 60 * 60 * 1000;
+    if (Number.isFinite(last) && last > 0 && now - last < sixHours) {
+      return;
+    }
+    localStorage.setItem(throttleKey, String(now));
+  } catch {
+    // ignore
+  }
+
   await setDoc(
     doc(firestore, "users", user.uid),
     {
@@ -162,18 +175,40 @@ async function resolveRole(user: User): Promise<AppRole> {
 }
 
 async function buildProfile(user: User): Promise<AppProfile> {
-  const role = await resolveRole(user);
-  await upsertBaseUserDoc(user, role);
-  const hub = await getFirestoreHub(user.uid);
+  try {
+    const role = await resolveRole(user);
+    await upsertBaseUserDoc(user, role);
+    const hub = await getFirestoreHub(user.uid);
 
-  return {
-    uid: user.uid,
-    email: user.email ?? null,
-    displayName: user.displayName ?? null,
-    photoURL: user.photoURL ?? null,
-    role,
-    hub,
-  };
+    return {
+      uid: user.uid,
+      email: user.email ?? null,
+      displayName: user.displayName ?? null,
+      photoURL: user.photoURL ?? null,
+      role,
+      hub,
+    };
+  } catch (e) {
+    const errAny = e as unknown as { code?: string };
+    const code = typeof errAny?.code === "string" ? errAny.code : null;
+    if (code === "resource-exhausted") {
+      const role: AppRole = isKawerifyTechAdminEmail(user.email)
+        ? "admin"
+        : isUncommonInstructorEmail(user.email)
+          ? "instructor"
+          : "student";
+
+      return {
+        uid: user.uid,
+        email: user.email ?? null,
+        displayName: user.displayName ?? null,
+        photoURL: user.photoURL ?? null,
+        role,
+        hub: null,
+      };
+    }
+    throw e;
+  }
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -233,16 +268,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signInWithGoogle: async () => {
         const provider = new GoogleAuthProvider();
         await signInWithPopup(firebaseAuth, provider);
-        await refreshProfile();
       },
       signInWithApple: async () => {
         const provider = new OAuthProvider("apple.com");
         await signInWithPopup(firebaseAuth, provider);
-        await refreshProfile();
       },
       signInWithEmail: async (email, password) => {
         await signInWithEmailAndPassword(firebaseAuth, email, password);
-        await refreshProfile();
       },
       signUpWithEmail: async ({ email, password, displayName, role, hub }) => {
         const result = await createUserWithEmailAndPassword(firebaseAuth, email, password);

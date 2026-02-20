@@ -18,10 +18,10 @@ export default function Dashboard() {
 
   return (
     <DashboardLayout>
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         {/* Header */}
         <header className="mb-8 animate-slide-up">
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-2">
             <h1 className="text-3xl font-display font-bold text-foreground">
               Home
             </h1>
@@ -93,8 +93,8 @@ export default function Dashboard() {
 
         {/* Learning Progress Bar */}
         <Card className="p-6 mb-8 animate-slide-up" style={{ animationDelay: "0.35s" }}>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+            <div className="flex items-center gap-3 min-w-0">
               <Zap className="w-5 h-5 text-primary" />
               <div>
                 <h3 className="font-semibold text-foreground">Learning Progress</h3>
@@ -102,7 +102,7 @@ export default function Dashboard() {
               </div>
             </div>
             <Link to="/students/courses">
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="w-full sm:w-auto">
                 Continue Learning
                 <ArrowRight className="w-4 h-4 ml-2" />
               </Button>

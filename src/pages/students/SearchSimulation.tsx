@@ -55,45 +55,51 @@ export default function SearchSimulation() {
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<Array<{ id: string; data: StudentEvent }>>([]);
 
+  const uid = profile?.uid;
+
+  const fetchEvents = async () => {
+    if (!uid) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const eventsRef = collection(firestore, "students", uid, "events");
+      const q = query(eventsRef, orderBy("createdAt", "desc"), limit(50));
+      const snap = await getDocs(q);
+      const next = snap.docs.map((d) => ({ id: d.id, data: d.data() as StudentEvent }));
+      setEvents(next);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const errAny = e as unknown as { code?: string };
+      const code = typeof errAny?.code === "string" ? errAny.code : null;
+      if (code === "resource-exhausted") {
+        setError("Firestore quota exceeded (free plan). Please wait a few minutes and refresh.");
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    let cancelled = false;
-    const uid = profile?.uid;
     if (!uid) {
       setEvents([]);
       setLoading(false);
       return;
     }
-
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const eventsRef = collection(firestore, "students", uid, "events");
-        let snap;
-        try {
-          snap = await getDocs(query(eventsRef, orderBy("createdAt", "desc"), limit(50)));
-        } catch {
-          snap = await getDocs(eventsRef);
-        }
-        const next = snap.docs.map((d) => ({ id: d.id, data: d.data() as StudentEvent }));
-        if (!cancelled) setEvents(next);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (!cancelled) setError(msg);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [profile?.uid]);
+    void fetchEvents();
+  }, [uid]);
 
   const crawlEvents = useMemo(() => {
     return events.filter((e) => {
       const t = (e.data.type ?? e.data.label ?? "").toLowerCase();
-      return t.includes("crawl") || t.includes("index") || t.includes("search");
+      return (
+        t.includes("crawl") ||
+        t.includes("index") ||
+        t.includes("search") ||
+        t.includes("technical") ||
+        t.includes("keyword")
+      );
     });
   }, [events]);
 
@@ -106,7 +112,7 @@ export default function SearchSimulation() {
 
   return (
     <DashboardLayout>
-      <div className="p-8">
+      <div className="p-4 sm:p-6">
         {/* Header */}
         <header className="mb-8 animate-slide-up">
           <h1 className="text-3xl font-display font-bold text-foreground mb-2">
@@ -138,10 +144,22 @@ export default function SearchSimulation() {
                   <h2 className="font-display font-bold text-xl text-foreground">
                     Bot Activity Log
                   </h2>
-                  <Button variant="outline" size="sm" disabled>
-                    <Zap className="w-4 h-4 mr-2" />
-                    Trigger Crawl
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        void fetchEvents();
+                      }}
+                      disabled={loading || !uid}
+                    >
+                      Refresh
+                    </Button>
+                    <Button variant="outline" size="sm" disabled>
+                      <Zap className="w-4 h-4 mr-2" />
+                      Trigger Crawl
+                    </Button>
+                  </div>
                 </div>
                 {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
                 {!loading && error && <div className="text-sm text-muted-foreground break-words">{error}</div>}
